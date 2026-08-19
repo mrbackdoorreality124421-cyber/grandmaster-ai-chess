@@ -192,6 +192,7 @@ class StockfishEngineService {
   private gameFenHistory: string[] = [];
   private currentAbortController: AbortController | null = null;
   private currentSearchingFen: string = '';
+  private lastWorkerInitTime: number = 0;
 
   constructor() {
     this.initWorker();
@@ -209,6 +210,13 @@ class StockfishEngineService {
   }
 
   private initWorker() {
+    const now = Date.now();
+    // 4. WEB WORKER THROTTLING: Never re-init within 2 seconds
+    if (now - this.lastWorkerInitTime < 2000 && this.worker) {
+      return;
+    }
+    this.lastWorkerInitTime = now;
+
     try {
       if (this.worker) {
         try {
@@ -274,7 +282,6 @@ class StockfishEngineService {
 
       this.worker.onerror = () => {
         this.isReady = false;
-        setTimeout(() => this.initWorker(), 500);
       };
 
       this.safePostMessage('uci');
@@ -290,8 +297,7 @@ class StockfishEngineService {
         this.worker.postMessage(msg);
       }
     } catch (err) {
-      console.warn('Silent postMessage restart:', err);
-      this.initWorker();
+      console.warn('Silent postMessage error:', err);
     }
   }
 
@@ -435,111 +441,18 @@ class StockfishEngineService {
     }
   }
 
-  private evaluatePosition(chess: Chess, botColor: 'w' | 'b'): number {
-    if (chess.isCheckmate()) return chess.turn() === botColor ? -999999 : 999999;
-    if (chess.isDraw() || chess.isStalemate()) return -500000;
-
-    let score = 0;
-    const board = chess.board();
-
-    for (let r = 0; r < 8; r++) {
-      for (let c = 0; c < 8; c++) {
-        const piece = board[r][c];
-        if (!piece) continue;
-
-        const val = PIECE_VALUES[piece.type] || 100;
-        const pstTable = PST[piece.type];
-        const pstIndex = piece.color === 'w' ? r * 8 + c : (7 - r) * 8 + c;
-        const pstVal = pstTable ? pstTable[pstIndex] : 0;
-        const pieceScore = val + pstVal;
-
-        if (piece.color === botColor) score += pieceScore;
-        else score -= pieceScore;
-      }
-    }
-    return score;
-  }
-
-  private sortMoves(moves: Move[]): Move[] {
-    return moves.sort((a, b) => {
-      let scoreA = 0;
-      let scoreB = 0;
-      if (a.promotion === 'q') scoreA += 900;
-      if (b.promotion === 'q') scoreB += 900;
-      if (a.captured) scoreA += (PIECE_VALUES[a.captured] || 100) * 10 - (PIECE_VALUES[a.piece] || 100);
-      if (b.captured) scoreB += (PIECE_VALUES[b.captured] || 100) * 10 - (PIECE_VALUES[b.piece] || 100);
-      return scoreB - scoreA;
-    });
-  }
-
-  private quiescence(chess: Chess, alpha: number, beta: number, botColor: 'w' | 'b', maxDepth: number): number {
-    const standPat = this.evaluatePosition(chess, botColor);
-    if (maxDepth <= 0 || standPat >= beta) return standPat;
-    let currentAlpha = Math.max(alpha, standPat);
-
-    const captureMoves = this.sortMoves(chess.moves({ verbose: true }).filter((m) => m.captured || m.promotion));
-    for (const move of captureMoves) {
-      chess.move(move);
-      const score = -this.quiescence(chess, -beta, -currentAlpha, botColor, maxDepth - 1);
-      chess.undo();
-      if (score >= beta) return beta;
-      if (score > currentAlpha) currentAlpha = score;
-    }
-    return currentAlpha;
-  }
-
-  private alphaBeta(
-    chess: Chess,
-    depth: number,
-    alpha: number,
-    beta: number,
-    isMaximizing: boolean,
-    botColor: 'w' | 'b'
-  ): number {
-    if (chess.isCheckmate()) return isMaximizing ? -999999 + depth : 999999 - depth;
-    if (chess.isStalemate() || chess.isDraw()) return -500000;
-    if (depth <= 0) return this.quiescence(chess, alpha, beta, botColor, 3);
-
-    const moves = this.sortMoves(chess.moves({ verbose: true }));
-    if (moves.length === 0) return 0;
-
-    if (isMaximizing) {
-      let maxEval = -Infinity;
-      for (const m of moves) {
-        chess.move(m);
-        const evalScore = this.alphaBeta(chess, depth - 1, alpha, beta, false, botColor);
-        chess.undo();
-        maxEval = Math.max(maxEval, evalScore);
-        alpha = Math.max(alpha, evalScore);
-        if (beta <= alpha) break;
-      }
-      return maxEval;
-    } else {
-      let minEval = Infinity;
-      for (const m of moves) {
-        chess.move(m);
-        const evalScore = this.alphaBeta(chess, depth - 1, alpha, beta, true, botColor);
-        chess.undo();
-        minEval = Math.min(minEval, evalScore);
-        beta = Math.min(beta, evalScore);
-        if (beta <= alpha) break;
-      }
-      return minEval;
-    }
-  }
-
   /**
-   * Deep Local Fallback Tactical Search (Ultimate Safety Evaluator)
+   * Lightweight, Non-Blocking Tactical Move Evaluator (Runs in <2ms)
    */
   public calculateGrandmasterMove(fen: string): string {
     try {
       const chess = new Chess(fen);
-      const moves = this.sortMoves(chess.moves({ verbose: true }));
+      const moves = chess.moves({ verbose: true });
       if (moves.length === 0) return '';
 
       const botColor = chess.turn();
 
-      // Check Mate in 1
+      // 1. Immediate Checkmate Search (Mate in 1)
       for (const m of moves) {
         chess.move(m);
         if (chess.isCheckmate()) {
@@ -549,6 +462,7 @@ class StockfishEngineService {
         chess.undo();
       }
 
+      // 2. Score candidate moves by MVV-LVA & PeSTO tables (0 recursive overhead)
       let bestScore = -Infinity;
       let bestMove = moves[0];
 
@@ -567,18 +481,26 @@ class StockfishEngineService {
           continue;
         }
 
-        let moveScore = 0;
-        if (chess.inCheck()) moveScore += 80;
-        if (m.captured) moveScore += (PIECE_VALUES[m.captured] || 100) * 10 - (PIECE_VALUES[m.piece] || 100);
-        if (m.promotion === 'q') moveScore += 900;
+        let score = 0;
+        if (chess.inCheck()) score += 100;
+        if (m.promotion === 'q') score += 900;
+        if (m.captured) {
+          score += (PIECE_VALUES[m.captured] || 100) * 10 - (PIECE_VALUES[m.piece] || 100);
+        }
 
-        const evalAfter = this.alphaBeta(chess, 3, -Infinity, Infinity, false, botColor);
-        moveScore += evalAfter;
+        // Positional PeSTO delta
+        const toCol = m.to.charCodeAt(0) - 97;
+        const toRow = 8 - parseInt(m.to[1], 10);
+        const pstIndex = botColor === 'w' ? toRow * 8 + toCol : (7 - toRow) * 8 + toCol;
+        const pstTable = PST[m.piece];
+        if (pstTable && pstTable[pstIndex]) {
+          score += pstTable[pstIndex];
+        }
 
         chess.undo();
 
-        if (moveScore > bestScore) {
-          bestScore = moveScore;
+        if (score > bestScore) {
+          bestScore = score;
           bestMove = m;
         }
       }
@@ -604,6 +526,10 @@ class StockfishEngineService {
     historyFens: string[],
     onBestMove: BestMoveCallback
   ) {
+    if (this.isSearching) {
+      return;
+    }
+
     const fen = sanitizeAndValidateFen(rawFen);
     this.currentSearchingFen = fen;
     this.gameFenHistory = historyFens || [];
@@ -616,7 +542,7 @@ class StockfishEngineService {
         if (validatedBookMove && !this.isDrawOrBlunder(fen, validatedBookMove)) {
           setTimeout(() => {
             onBestMove(validatedBookMove);
-          }, 40);
+          }, 30);
           return;
         }
       }
@@ -669,10 +595,10 @@ class StockfishEngineService {
     } catch {}
 
     const isTactical = Boolean(simChess?.inCheck()) || pieceCount <= 12;
-    const targetDepth = isTactical ? 30 : 22;
-    const movetime = isTactical ? 2800 : 2000;
+    const targetDepth = isTactical ? 28 : 22;
+    const movetime = isTactical ? 2500 : 1800;
 
-    // Watchdog Timer (Triggers deep local minimax if engine takes > 2.8s)
+    // Watchdog Timer (Triggers fast non-blocking evaluation if engine takes > 2.5s)
     this.clearWatchdog();
     this.searchWatchdogTimer = setTimeout(() => {
       if (this.isSearching) {

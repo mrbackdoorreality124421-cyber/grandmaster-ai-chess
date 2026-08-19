@@ -17,6 +17,23 @@ import { ChessBoard } from './components/ChessBoard';
 import { StartupModal } from './components/StartupModal';
 import { SplashScreen } from './components/SplashScreen';
 
+// ============================================================================
+// 1. EMERGENCY TOP-LEVEL CACHE NUKE (OUTSIDE ALL COMPONENTS - ESCAPE DEATH LOOP)
+// ============================================================================
+try {
+  localStorage.removeItem('gameState');
+  localStorage.removeItem('chessState');
+  localStorage.removeItem('chess_state');
+  localStorage.removeItem('chess_game');
+  localStorage.removeItem('savedFen');
+  localStorage.removeItem('fen');
+  localStorage.removeItem('chess_history');
+} catch (e) {
+  console.warn('Storage purge notice:', e);
+}
+
+const DEFAULT_STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+
 /**
  * Universal Move Applier (Executes SAN, UCI string, or Move object)
  */
@@ -40,7 +57,7 @@ function applyAnyMove(
         try {
           const from = raw.substring(0, 2) as Square;
           const to = raw.substring(2, 4) as Square;
-          const promotion = raw.length > 4 ? raw[4].toLowerCase() : undefined;
+          const promotion = raw.length > 4 ? raw[4].toLowerCase() : 'q';
           const res = chess.move({ from, to, promotion });
           if (res) return res;
         } catch {}
@@ -61,7 +78,11 @@ function applyAnyMove(
     } else {
       // 4. Object format
       try {
-        const res = chess.move(moveInput);
+        const res = chess.move({
+          from: moveInput.from,
+          to: moveInput.to,
+          promotion: moveInput.promotion || 'q'
+        });
         if (res) return res;
       } catch {}
     }
@@ -76,12 +97,28 @@ export default function App() {
   // Splash Screen State
   const [showSplash, setShowSplash] = useState<boolean>(true);
 
-  // Core Chess State
-  const [chess] = useState(() => new Chess());
-  const [fen, setFen] = useState<string>(chess.fen());
+  // Core Chess State with Safe Factory
+  const [chess] = useState(() => {
+    try {
+      return new Chess();
+    } catch {
+      const c = new Chess();
+      c.load(DEFAULT_STARTING_FEN);
+      return c;
+    }
+  });
+
+  const [fen, setFen] = useState<string>(() => {
+    try {
+      return chess.fen();
+    } catch {
+      return DEFAULT_STARTING_FEN;
+    }
+  });
+
   const [history, setHistory] = useState<MoveRecord[]>([]);
-  const [gameFenHistory, setGameFenHistory] = useState<string[]>([chess.fen()]);
-  const gameFenHistoryRef = useRef<string[]>([chess.fen()]);
+  const [gameFenHistory, setGameFenHistory] = useState<string[]>([DEFAULT_STARTING_FEN]);
+  const gameFenHistoryRef = useRef<string[]>([DEFAULT_STARTING_FEN]);
   const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(null);
 
   // Visual Move Indicators
@@ -96,10 +133,13 @@ export default function App() {
 
   // Engine Calculation & Lock States
   const [isBotThinking, setIsBotThinking] = useState<boolean>(false);
-  const isBotThinkingRef = useRef<boolean>(false);
   const [isBoardLocked, setIsBoardLocked] = useState<boolean>(false);
   const [statusText, setStatusText] = useState<string>('');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // 2. STRICT MUTEX LOCK (useRef to prevent render loops & duplicate calls)
+  const isEngineRunning = useRef<boolean>(false);
+  const lastProcessedTurnFen = useRef<string>('');
 
   // God Mode State
   const [isGodModeUnlocked, setIsGodModeUnlocked] = useState<boolean>(false);
@@ -114,231 +154,248 @@ export default function App() {
 
   // Game status check
   const checkGameOver = useCallback((): boolean => {
-    if (chess.isCheckmate()) {
-      const winner = chess.turn() === 'w' ? 'b' : 'w';
-      const winnerName = winner === 'w' ? 'White' : 'Black';
-      setGameOverInfo({
-        isOver: true,
-        title: `CHECKMATE! ${winnerName} Wins!`,
-        description: `Victory achieved through checkmate.`,
-        winner
-      });
-      playChessSound('win');
-      confetti({
-        particleCount: 160,
-        spread: 85,
-        origin: { y: 0.55 },
-        colors: ['#d4af37', '#f59e0b', '#fbbf24', '#ffffff', '#e2e8f0']
-      });
-      return true;
-    } else if (chess.isDraw()) {
-      let desc = 'The game ended in a draw.';
-      if (chess.isStalemate()) desc = 'Draw by Stalemate (no legal moves).';
-      else if (chess.isThreefoldRepetition()) desc = 'Draw by Threefold Repetition.';
-      else if (chess.isInsufficientMaterial()) desc = 'Draw by Insufficient Material.';
-      setGameOverInfo({
-        isOver: true,
-        title: 'DRAW!',
-        description: desc,
-        winner: 'draw'
-      });
-      return true;
+    try {
+      if (chess.isCheckmate()) {
+        const winner = chess.turn() === 'w' ? 'b' : 'w';
+        const winnerName = winner === 'w' ? 'White' : 'Black';
+        setGameOverInfo({
+          isOver: true,
+          title: `CHECKMATE! ${winnerName} Wins!`,
+          description: `Victory achieved through checkmate.`,
+          winner
+        });
+        playChessSound('win');
+        confetti({
+          particleCount: 160,
+          spread: 85,
+          origin: { y: 0.55 },
+          colors: ['#d4af37', '#f59e0b', '#fbbf24', '#ffffff', '#e2e8f0']
+        });
+        return true;
+      } else if (chess.isDraw()) {
+        let desc = 'The game ended in a draw.';
+        if (chess.isStalemate()) desc = 'Draw by Stalemate (no legal moves).';
+        else if (chess.isThreefoldRepetition()) desc = 'Draw by Threefold Repetition.';
+        else if (chess.isInsufficientMaterial()) desc = 'Draw by Insufficient Material.';
+        setGameOverInfo({
+          isOver: true,
+          title: 'DRAW!',
+          description: desc,
+          winner: 'draw'
+        });
+        return true;
+      }
+    } catch (err) {
+      console.warn('checkGameOver error:', err);
     }
     return false;
   }, [chess]);
 
   // =========================================================================
-  // 🦁 LION AUTOMATIC MOVE EXECUTION (WITH ULTIMATE FAILSAFE - NEVER FREEZE)
+  // 🦁 LION AUTOMATIC MOVE EXECUTION (WITH STRICT MUTEX LOCK & FAILSAFE)
   // =========================================================================
 
   const executeBotMoveFor = useCallback(
     (targetColor: PlayerColor) => {
-      if (chess.isGameOver() || isBotThinkingRef.current) return;
+      // 2. STRICT MUTEX CHECK: Return immediately if already running
+      if (isEngineRunning.current) return;
+      if (chess.isGameOver()) return;
+
       const turn = chess.turn();
       if (targetColor !== 'both' && turn !== targetColor) return;
 
-      isBotThinkingRef.current = true;
+      // Lock engine mutex
+      isEngineRunning.current = true;
       setIsBotThinking(true);
+      setIsBoardLocked(true);
 
       const currentFen = sanitizeAndValidateFen(chess.fen());
-
       let isResolved = false;
 
-      // 3. THE ULTIMATE FAILSAFE (NEVER FREEZE - 6-SECOND TIMEOUT FALLBACK)
+      // 6-Second Timeout Watchdog (Never locks the app)
       const timeoutGuard = setTimeout(() => {
-        if (!isResolved && isBotThinkingRef.current) {
-          console.warn('Bot calculation 6s timeout reached. Triggering ultimate emergency move.');
+        if (!isResolved && isEngineRunning.current) {
+          console.warn('Engine 6s timeout reached. Unlocking board.');
           isResolved = true;
 
-          // Restart worker silently
-          stockfishService.restartWorker();
+          try {
+            // Attempt emergency single move
+            const possibleMoves = chess.moves({ verbose: true });
+            if (possibleMoves.length > 0) {
+              const emergencyMove = possibleMoves[0];
+              const pieceOnFrom = chess.get(emergencyMove.from);
+              const result = chess.move(emergencyMove);
 
-          // Fetch all legal moves and instantly play the first valid move
-          const possibleMoves = chess.moves({ verbose: true });
-          if (possibleMoves.length > 0) {
-            const emergencyMove = possibleMoves[0];
-            const pieceOnFrom = chess.get(emergencyMove.from);
-            const result = chess.move(emergencyMove);
+              if (result) {
+                const newFen = sanitizeAndValidateFen(chess.fen());
+                gameFenHistoryRef.current = [...gameFenHistoryRef.current, newFen];
+                setGameFenHistory(gameFenHistoryRef.current);
+                setLastMove({ from: emergencyMove.from, to: emergencyMove.to });
+                setBotArrow({ from: emergencyMove.from, to: emergencyMove.to });
 
-            if (result) {
-              const newFen = sanitizeAndValidateFen(chess.fen());
-              gameFenHistoryRef.current = [...gameFenHistoryRef.current, newFen];
-              setGameFenHistory(gameFenHistoryRef.current);
-              setLastMove({ from: emergencyMove.from, to: emergencyMove.to });
-              setBotArrow({ from: emergencyMove.from, to: emergencyMove.to });
+                if (pieceOnFrom) {
+                  setGhostPiece({
+                    square: emergencyMove.from,
+                    type: pieceOnFrom.type,
+                    color: pieceOnFrom.color
+                  });
+                }
 
-              if (pieceOnFrom) {
-                setGhostPiece({
-                  square: emergencyMove.from,
-                  type: pieceOnFrom.type,
-                  color: pieceOnFrom.color
-                });
+                playChessSound(result.captured ? 'capture' : 'move');
+
+                const record: MoveRecord = {
+                  san: result.san,
+                  from: result.from,
+                  to: result.to,
+                  piece: result.piece,
+                  color: result.color,
+                  captured: result.captured,
+                  promotion: result.promotion,
+                  flags: result.flags,
+                  fenBefore: currentFen,
+                  fenAfter: newFen
+                };
+                setHistory((prev) => [...prev, record]);
+                checkGameOver();
+                setFen(newFen);
               }
-
-              playChessSound(result.captured ? 'capture' : 'move');
-
-              const record: MoveRecord = {
-                san: result.san,
-                from: result.from,
-                to: result.to,
-                piece: result.piece,
-                color: result.color,
-                captured: result.captured,
-                promotion: result.promotion,
-                flags: result.flags,
-                fenBefore: currentFen,
-                fenAfter: newFen
-              };
-              setHistory((prev) => [...prev, record]);
-              checkGameOver();
-              setFen(newFen);
             }
+          } catch (err) {
+            console.error('Emergency move error:', err);
+          } finally {
+            isEngineRunning.current = false;
+            setIsBotThinking(false);
+            setIsBoardLocked(false);
           }
-
-          isBotThinkingRef.current = false;
-          setIsBotThinking(false);
-          setIsBoardLocked(false);
-          setToastMessage('Failsafe move played.');
-          setTimeout(() => setToastMessage(null), 3000);
         }
       }, 6000);
 
-      stockfishService.calculateMove(
-        currentFen,
-        personality,
-        gameFenHistoryRef.current,
-        (bestMoveStr) => {
-          if (isResolved) return;
-          isResolved = true;
-          clearTimeout(timeoutGuard);
+      try {
+        stockfishService.calculateMove(
+          currentFen,
+          personality,
+          gameFenHistoryRef.current,
+          (bestMoveStr) => {
+            if (isResolved) return;
+            isResolved = true;
+            clearTimeout(timeoutGuard);
 
-          try {
-            // 1. UNIFIED MOVE PARSER: Try applying the move directly (handles SAN + UCI)
-            let result = applyAnyMove(chess, bestMoveStr);
+            try {
+              // 1. UNIFIED MOVE PARSER: Try applying the move directly (handles SAN + UCI)
+              let result = applyAnyMove(chess, bestMoveStr);
 
-            // If move failed, try regex/UCI converter
-            if (!result) {
-              const uciMove = extractAnyValidMove(currentFen, bestMoveStr);
-              if (uciMove) {
-                result = applyAnyMove(chess, uciMove);
-              }
-            }
-
-            // If still failed, try deep grandmaster minimax
-            if (!result) {
-              const gmMove = stockfishService.calculateGrandmasterMove(currentFen);
-              if (gmMove) {
-                result = applyAnyMove(chess, gmMove);
-              }
-            }
-
-            // 3. ULTIMATE FAILSAFE: If everything fails, pick first legal move
-            if (!result) {
-              const possibleMoves = chess.moves({ verbose: true });
-              if (possibleMoves.length > 0) {
-                result = chess.move(possibleMoves[0]);
-              }
-            }
-
-            if (result) {
-              const newFen = sanitizeAndValidateFen(chess.fen());
-              gameFenHistoryRef.current = [...gameFenHistoryRef.current, newFen];
-              setGameFenHistory(gameFenHistoryRef.current);
-              setLastMove({ from: result.from, to: result.to });
-
-              // Render single tactical arrow
-              setBotArrow({ from: result.from, to: result.to });
-
-              // Render ghost piece on origin square
-              setGhostPiece({
-                square: result.from,
-                type: result.piece,
-                color: result.color
-              });
-
-              // Play audio feedback
-              if (chess.inCheck()) {
-                playChessSound('check');
-              } else if (result.captured) {
-                playChessSound('capture');
-              } else {
-                playChessSound('move');
+              // If move failed, try regex/UCI converter
+              if (!result) {
+                const uciMove = extractAnyValidMove(currentFen, bestMoveStr);
+                if (uciMove) {
+                  result = applyAnyMove(chess, uciMove);
+                }
               }
 
-              // Update move history
-              const record: MoveRecord = {
-                san: result.san,
-                from: result.from,
-                to: result.to,
-                piece: result.piece,
-                color: result.color,
-                captured: result.captured,
-                promotion: result.promotion,
-                flags: result.flags,
-                fenBefore: currentFen,
-                fenAfter: newFen
-              };
-              setHistory((prev) => [...prev, record]);
-
-              checkGameOver();
-
-              // Trigger state update to dispatch next reactive turn
-              setFen(newFen);
-            }
-          } catch (err) {
-            console.error('Error executing bot move, triggering emergency fallback:', err);
-            // Emergency fallback on catch
-            const possibleMoves = chess.moves({ verbose: true });
-            if (possibleMoves.length > 0) {
-              const em = possibleMoves[0];
-              const res = chess.move(em);
-              if (res) {
-                const nFen = sanitizeAndValidateFen(chess.fen());
-                setFen(nFen);
-                setLastMove({ from: res.from, to: res.to });
-                setBotArrow({ from: res.from, to: res.to });
+              // If still failed, try fast positional grandmaster move
+              if (!result) {
+                const gmMove = stockfishService.calculateGrandmasterMove(currentFen);
+                if (gmMove) {
+                  result = applyAnyMove(chess, gmMove);
+                }
               }
+
+              // 3. Ultimate non-blocking legal move fallback
+              if (!result) {
+                const possibleMoves = chess.moves({ verbose: true });
+                if (possibleMoves.length > 0) {
+                  result = chess.move(possibleMoves[0]);
+                }
+              }
+
+              if (result) {
+                const newFen = sanitizeAndValidateFen(chess.fen());
+                gameFenHistoryRef.current = [...gameFenHistoryRef.current, newFen];
+                setGameFenHistory(gameFenHistoryRef.current);
+                setLastMove({ from: result.from, to: result.to });
+
+                // Render single tactical arrow
+                setBotArrow({ from: result.from, to: result.to });
+
+                // Render ghost piece on origin square
+                setGhostPiece({
+                  square: result.from,
+                  type: result.piece,
+                  color: result.color
+                });
+
+                // Play audio feedback
+                if (chess.inCheck()) {
+                  playChessSound('check');
+                } else if (result.captured) {
+                  playChessSound('capture');
+                } else {
+                  playChessSound('move');
+                }
+
+                // Update move history
+                const record: MoveRecord = {
+                  san: result.san,
+                  from: result.from,
+                  to: result.to,
+                  piece: result.piece,
+                  color: result.color,
+                  captured: result.captured,
+                  promotion: result.promotion,
+                  flags: result.flags,
+                  fenBefore: currentFen,
+                  fenAfter: newFen
+                };
+                setHistory((prev) => [...prev, record]);
+
+                checkGameOver();
+
+                // Trigger state update to dispatch next reactive turn
+                setFen(newFen);
+              }
+            } catch (err) {
+              console.error('Error executing bot move:', err);
+              // 3. DO NOT recursively retry. Unlock board and show clear message.
+              setIsBoardLocked(false);
+              setToastMessage('Engine Error: Please make a manual move for the bot.');
+              setTimeout(() => setToastMessage(null), 4000);
+            } finally {
+              isEngineRunning.current = false;
+              setIsBotThinking(false);
             }
-          } finally {
-            isBotThinkingRef.current = false;
-            setIsBotThinking(false);
           }
-        }
-      );
+        );
+      } catch (calcError) {
+        console.error('Calculation initiation error:', calcError);
+        clearTimeout(timeoutGuard);
+        isEngineRunning.current = false;
+        setIsBotThinking(false);
+        setIsBoardLocked(false);
+        setToastMessage('Engine Error: Please make a manual move for the bot.');
+        setTimeout(() => setToastMessage(null), 4000);
+      }
     },
     [chess, personality, checkGameOver]
   );
 
   // =========================================================================
-  // SURGICAL REACTIVE TURN DISPATCHER
+  // 3. BREAK useEffect DEPENDENCY CYCLES (Strictly triggered once per distinct turn FEN)
   // =========================================================================
 
   useEffect(() => {
     if (isSetupModalOpen) return;
     if (chess.isGameOver()) return;
 
+    const currentFen = chess.fen();
     const turn = chess.turn(); // 'w' or 'b'
+
     if (userColor !== 'both' && turn === userColor) {
+      // Prevent duplicate triggers for the same position
+      if (isEngineRunning.current || lastProcessedTurnFen.current === currentFen) {
+        return;
+      }
+      lastProcessedTurnFen.current = currentFen;
+
       setIsBoardLocked(true);
       setStatusText("🦁 LION thinking for " + (userColor === 'w' ? 'White' : 'Black'));
       executeBotMoveFor(userColor);
@@ -356,11 +413,11 @@ export default function App() {
     (move: { from: string; to: string; promotion?: string }): boolean => {
       const turn = chess.turn();
 
-      // Rule: User is NEVER allowed to move their own color
+      // Rule: User is NEVER allowed to move during bot's turn or while engine is calculating
       if (userColor !== 'both' && turn === userColor) {
         return false;
       }
-      if (isBotThinkingRef.current) {
+      if (isEngineRunning.current) {
         return false;
       }
 
@@ -450,6 +507,8 @@ export default function App() {
       setHistory([]);
       gameFenHistoryRef.current = [sanitized];
       setGameFenHistory([sanitized]);
+      lastProcessedTurnFen.current = '';
+      isEngineRunning.current = false;
       setLastMove(null);
       setBotArrow(null);
       setGhostPiece(null);
@@ -466,7 +525,8 @@ export default function App() {
   // Open Main Menu: Stop engine, reset state, and reopen setup modal
   const handleOpenMainMenu = useCallback(() => {
     stockfishService.reset();
-    isBotThinkingRef.current = false;
+    isEngineRunning.current = false;
+    lastProcessedTurnFen.current = '';
     setIsBotThinking(false);
     setIsBoardLocked(false);
     setBotArrow(null);
