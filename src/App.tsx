@@ -1,38 +1,26 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { Chess, Square, Move } from 'chess.js';
 import confetti from 'canvas-confetti';
-import { Trophy, RefreshCw, AlertCircle } from 'lucide-react';
+import { Trophy, RefreshCw, AlertCircle, Sparkles } from 'lucide-react';
 
-import { LION_MODE } from './constants/chessData';
-import { AIPersonality, MoveRecord, PlayerColor, PresetVariant } from './types/chess';
+import { AI_PERSONALITIES, LION_MODE, PRESET_VARIANTS } from './constants/chessData';
+import { AIPersonality, MoveRecord, PlayerColor, PresetVariant, SavedGameState } from './types/chess';
 import {
   stockfishService,
   extractAnyValidMove,
-  sanitizeAndValidateFen
+  sanitizeAndValidateFen,
+  DEFAULT_STARTING_FEN
 } from './services/stockfishEngine';
-import { playChessSound } from './utils/audio';
+import { playChessSound, setSoundEnabled, isSoundEnabled } from './utils/audio';
 
 import { Header } from './components/Header';
 import { ChessBoard } from './components/ChessBoard';
+import { EvalBar } from './components/EvalBar';
+import { MoveHistoryPanel } from './components/MoveHistoryPanel';
 import { StartupModal } from './components/StartupModal';
 import { SplashScreen } from './components/SplashScreen';
 
-// ============================================================================
-// 1. EMERGENCY TOP-LEVEL CACHE NUKE (OUTSIDE ALL COMPONENTS - ESCAPE DEATH LOOP)
-// ============================================================================
-try {
-  localStorage.removeItem('gameState');
-  localStorage.removeItem('chessState');
-  localStorage.removeItem('chess_state');
-  localStorage.removeItem('chess_game');
-  localStorage.removeItem('savedFen');
-  localStorage.removeItem('fen');
-  localStorage.removeItem('chess_history');
-} catch (e) {
-  console.warn('Storage purge notice:', e);
-}
-
-const DEFAULT_STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+const SAVED_GAME_KEY = 'gma_saved_state_v1';
 
 /**
  * Universal Move Applier (Executes SAN, UCI string, or Move object)
@@ -97,8 +85,8 @@ export default function App() {
   // Splash Screen State
   const [showSplash, setShowSplash] = useState<boolean>(true);
 
-  // Core Chess State with Safe Factory
-  const [chess] = useState(() => {
+  // Core Live Chess State with Safe Factory
+  const [liveChess] = useState(() => {
     try {
       return new Chess();
     } catch {
@@ -108,28 +96,32 @@ export default function App() {
     }
   });
 
-  const [fen, setFen] = useState<string>(() => {
-    try {
-      return chess.fen();
-    } catch {
-      return DEFAULT_STARTING_FEN;
-    }
-  });
-
+  const [fen, setFen] = useState<string>(DEFAULT_STARTING_FEN);
   const [history, setHistory] = useState<MoveRecord[]>([]);
   const [gameFenHistory, setGameFenHistory] = useState<string[]>([DEFAULT_STARTING_FEN]);
   const gameFenHistoryRef = useRef<string[]>([DEFAULT_STARTING_FEN]);
   const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(null);
 
-  // Visual Move Indicators
+  // Live Position Inspector State (Read-only historical inspection)
+  const [inspectedMoveIndex, setInspectedMoveIndex] = useState<number | null>(null);
+  const [displayChess, setDisplayChess] = useState<Chess>(liveChess);
+
+  // Visual Move & Tactical Indicators
   const [botArrow, setBotArrow] = useState<{ from: string; to: string } | null>(null);
   const [ghostPiece, setGhostPiece] = useState<{ square: string; type: string; color: 'w' | 'b' } | null>(null);
+  const [evalScoreCp, setEvalScoreCp] = useState<number>(0);
 
-  // Configuration
-  const [personality] = useState<AIPersonality>(LION_MODE);
-  const [userColor, setUserColor] = useState<PlayerColor>('w'); // The color LION plays for
+  // Configuration & Personality
+  const [personality, setPersonality] = useState<AIPersonality>(LION_MODE);
+  const [userColor, setUserColor] = useState<PlayerColor>('w'); // The color AI plays for
   const [isFlipped, setIsFlipped] = useState<boolean>(false);
   const [isSetupModalOpen, setIsSetupModalOpen] = useState<boolean>(true);
+  const [savedGameAvailable, setSavedGameAvailable] = useState<boolean>(false);
+
+  // Settings Toggles
+  const [isSoundOn, setIsSoundOn] = useState<boolean>(true);
+  const [showArrows, setShowArrows] = useState<boolean>(true);
+  const [isGodMode, setIsGodMode] = useState<boolean>(false);
 
   // Engine Calculation & Lock States
   const [isBotThinking, setIsBotThinking] = useState<boolean>(false);
@@ -137,12 +129,9 @@ export default function App() {
   const [statusText, setStatusText] = useState<string>('');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // 2. STRICT MUTEX LOCK (useRef to prevent render loops & duplicate calls)
+  // Strict Mutex Lock
   const isEngineRunning = useRef<boolean>(false);
   const lastProcessedTurnFen = useRef<string>('');
-
-  // God Mode State
-  const [isGodModeUnlocked, setIsGodModeUnlocked] = useState<boolean>(false);
 
   // Game Over Modal State
   const [gameOverInfo, setGameOverInfo] = useState<{
@@ -152,11 +141,113 @@ export default function App() {
     winner: 'w' | 'b' | 'draw' | null;
   }>({ isOver: false, title: '', description: '', winner: null });
 
+  // 5. SAFE RESUME & INITIAL STORAGE VALIDATION
+  useEffect(() => {
+    try {
+      const savedRaw = localStorage.getItem(SAVED_GAME_KEY);
+      if (savedRaw) {
+        const parsed: SavedGameState = JSON.parse(savedRaw);
+        if (parsed && parsed.fen && parsed.version === 1) {
+          const validated = sanitizeAndValidateFen(parsed.fen);
+          if (validated && parsed.history && parsed.history.length > 0) {
+            setSavedGameAvailable(true);
+          }
+        }
+      }
+    } catch {
+      localStorage.removeItem(SAVED_GAME_KEY);
+    }
+  }, []);
+
+  // Save current game state on every move
+  const persistGameState = useCallback(
+    (currentFen: string, currentHistory: MoveRecord[], currentPersonality: AIPersonality, currentColor: PlayerColor) => {
+      try {
+        if (currentHistory.length === 0) return;
+        const state: SavedGameState = {
+          version: 1,
+          fen: currentFen,
+          history: currentHistory,
+          personalityId: currentPersonality.id,
+          userColor: currentColor,
+          isFlipped,
+          timestamp: Date.now()
+        };
+        localStorage.setItem(SAVED_GAME_KEY, JSON.stringify(state));
+      } catch (err) {
+        console.warn('Failed to persist game state:', err);
+      }
+    },
+    [isFlipped]
+  );
+
+  // Resume saved match
+  const handleResumeSavedGame = useCallback(() => {
+    try {
+      const savedRaw = localStorage.getItem(SAVED_GAME_KEY);
+      if (!savedRaw) return;
+      const parsed: SavedGameState = JSON.parse(savedRaw);
+      const sanitized = sanitizeAndValidateFen(parsed.fen);
+
+      const foundPersonality = AI_PERSONALITIES.find((p) => p.id === parsed.personalityId) || LION_MODE;
+      setPersonality(foundPersonality);
+      setUserColor(parsed.userColor);
+      setIsFlipped(parsed.isFlipped ?? parsed.userColor === 'b');
+
+      liveChess.load(sanitized);
+      setFen(sanitized);
+      setDisplayChess(liveChess);
+      setHistory(parsed.history || []);
+
+      const reconstructedHistory = [DEFAULT_STARTING_FEN, ...(parsed.history || []).map((h) => h.fenAfter)];
+      gameFenHistoryRef.current = reconstructedHistory;
+      setGameFenHistory(reconstructedHistory);
+
+      if (parsed.history && parsed.history.length > 0) {
+        const last = parsed.history[parsed.history.length - 1];
+        setLastMove({ from: last.from, to: last.to });
+      }
+
+      setIsSetupModalOpen(false);
+      setToastMessage('Match resumed successfully.');
+      setTimeout(() => setToastMessage(null), 3000);
+    } catch (err) {
+      console.warn('Failed to resume saved game:', err);
+      localStorage.removeItem(SAVED_GAME_KEY);
+      setSavedGameAvailable(false);
+    }
+  }, [liveChess]);
+
+  // Connect live evaluation callback from Stockfish Engine
+  useEffect(() => {
+    stockfishService.setEvalCallback((cp) => {
+      setEvalScoreCp(cp);
+    });
+    return () => {
+      stockfishService.setEvalCallback(null);
+    };
+  }, []);
+
+  // Update Display Chess instance when inspecting history vs live
+  useEffect(() => {
+    if (inspectedMoveIndex === null) {
+      setDisplayChess(liveChess);
+    } else if (history[inspectedMoveIndex]) {
+      try {
+        const inspectFen = history[inspectedMoveIndex].fenAfter;
+        const temp = new Chess(inspectFen);
+        setDisplayChess(temp);
+      } catch {
+        setDisplayChess(liveChess);
+      }
+    }
+  }, [inspectedMoveIndex, history, liveChess, fen]);
+
   // Game status check
   const checkGameOver = useCallback((): boolean => {
     try {
-      if (chess.isCheckmate()) {
-        const winner = chess.turn() === 'w' ? 'b' : 'w';
+      if (liveChess.isCheckmate()) {
+        const winner = liveChess.turn() === 'w' ? 'b' : 'w';
         const winnerName = winner === 'w' ? 'White' : 'Black';
         setGameOverInfo({
           isOver: true,
@@ -172,11 +263,11 @@ export default function App() {
           colors: ['#d4af37', '#f59e0b', '#fbbf24', '#ffffff', '#e2e8f0']
         });
         return true;
-      } else if (chess.isDraw()) {
+      } else if (liveChess.isDraw()) {
         let desc = 'The game ended in a draw.';
-        if (chess.isStalemate()) desc = 'Draw by Stalemate (no legal moves).';
-        else if (chess.isThreefoldRepetition()) desc = 'Draw by Threefold Repetition.';
-        else if (chess.isInsufficientMaterial()) desc = 'Draw by Insufficient Material.';
+        if (liveChess.isStalemate()) desc = 'Draw by Stalemate (no legal moves).';
+        else if (liveChess.isThreefoldRepetition()) desc = 'Draw by Threefold Repetition.';
+        else if (liveChess.isInsufficientMaterial()) desc = 'Draw by Insufficient Material.';
         setGameOverInfo({
           isOver: true,
           title: 'DRAW!',
@@ -189,53 +280,60 @@ export default function App() {
       console.warn('checkGameOver error:', err);
     }
     return false;
-  }, [chess]);
+  }, [liveChess]);
 
   // =========================================================================
-  // 🦁 LION AUTOMATIC MOVE EXECUTION (WITH STRICT MUTEX LOCK & FAILSAFE)
+  // 🦁 AI MOVE EXECUTION (WITH SMARTER LOCAL FALLBACK)
   // =========================================================================
 
   const executeBotMoveFor = useCallback(
     (targetColor: PlayerColor) => {
-      // 2. STRICT MUTEX CHECK: Return immediately if already running
+      // 2. STRICT MUTEX CHECK
       if (isEngineRunning.current) return;
-      if (chess.isGameOver()) return;
+      if (liveChess.isGameOver()) return;
 
-      const turn = chess.turn();
+      const turn = liveChess.turn();
       if (targetColor !== 'both' && turn !== targetColor) return;
 
-      // Lock engine mutex
       isEngineRunning.current = true;
       setIsBotThinking(true);
       setIsBoardLocked(true);
 
-      const currentFen = sanitizeAndValidateFen(chess.fen());
+      const currentFen = sanitizeAndValidateFen(liveChess.fen());
       let isResolved = false;
 
-      // 6-Second Timeout Watchdog (Never locks the app)
+      // 3. SMARTER LOCAL ENGINE 6-SECOND WATCHDOG TIMEOUT
       const timeoutGuard = setTimeout(() => {
         if (!isResolved && isEngineRunning.current) {
-          console.warn('Engine 6s timeout reached. Unlocking board.');
+          console.warn('Engine 6s timeout reached. Executing smarter alpha-beta fallback.');
           isResolved = true;
 
           try {
-            // Attempt emergency single move
-            const possibleMoves = chess.moves({ verbose: true });
-            if (possibleMoves.length > 0) {
-              const emergencyMove = possibleMoves[0];
-              const pieceOnFrom = chess.get(emergencyMove.from);
-              const result = chess.move(emergencyMove);
+            // Run iterative alpha-beta local search instead of random moves[0]
+            const searchResult = stockfishService.calculateGrandmasterMove(currentFen, personality.localSearchDepth);
+            let emergencyMoveStr = searchResult.move;
 
+            if (!emergencyMoveStr) {
+              const legals = liveChess.moves({ verbose: true });
+              if (legals.length > 0) {
+                emergencyMoveStr = `${legals[0].from}${legals[0].to}${legals[0].promotion || ''}`;
+              }
+            }
+
+            if (emergencyMoveStr) {
+              const result = applyAnyMove(liveChess, emergencyMoveStr);
               if (result) {
-                const newFen = sanitizeAndValidateFen(chess.fen());
+                const newFen = sanitizeAndValidateFen(liveChess.fen());
                 gameFenHistoryRef.current = [...gameFenHistoryRef.current, newFen];
                 setGameFenHistory(gameFenHistoryRef.current);
-                setLastMove({ from: emergencyMove.from, to: emergencyMove.to });
-                setBotArrow({ from: emergencyMove.from, to: emergencyMove.to });
+                setLastMove({ from: result.from, to: result.to });
+                setBotArrow({ from: result.from, to: result.to });
+                setEvalScoreCp(searchResult.scoreCentipawns || 0);
 
+                const pieceOnFrom = liveChess.get(result.to);
                 if (pieceOnFrom) {
                   setGhostPiece({
-                    square: emergencyMove.from,
+                    square: result.from,
                     type: pieceOnFrom.type,
                     color: pieceOnFrom.color
                   });
@@ -255,7 +353,11 @@ export default function App() {
                   fenBefore: currentFen,
                   fenAfter: newFen
                 };
-                setHistory((prev) => [...prev, record]);
+                setHistory((prev) => {
+                  const updated = [...prev, record];
+                  persistGameState(newFen, updated, personality, userColor);
+                  return updated;
+                });
                 checkGameOver();
                 setFen(newFen);
               }
@@ -275,47 +377,49 @@ export default function App() {
           currentFen,
           personality,
           gameFenHistoryRef.current,
-          (bestMoveStr) => {
+          (bestMoveStr, scoreCp) => {
             if (isResolved) return;
             isResolved = true;
             clearTimeout(timeoutGuard);
 
             try {
-              // 1. UNIFIED MOVE PARSER: Try applying the move directly (handles SAN + UCI)
-              let result = applyAnyMove(chess, bestMoveStr);
+              // 1. Unified Move Parser (SAN + UCI)
+              let result = applyAnyMove(liveChess, bestMoveStr);
 
               // If move failed, try regex/UCI converter
               if (!result) {
                 const uciMove = extractAnyValidMove(currentFen, bestMoveStr);
                 if (uciMove) {
-                  result = applyAnyMove(chess, uciMove);
+                  result = applyAnyMove(liveChess, uciMove);
                 }
               }
 
-              // If still failed, try fast positional grandmaster move
+              // If still failed, try smarter local alpha-beta search
               if (!result) {
-                const gmMove = stockfishService.calculateGrandmasterMove(currentFen);
-                if (gmMove) {
-                  result = applyAnyMove(chess, gmMove);
+                const searchResult = stockfishService.calculateGrandmasterMove(currentFen, personality.localSearchDepth);
+                if (searchResult.move) {
+                  result = applyAnyMove(liveChess, searchResult.move);
                 }
               }
 
-              // 3. Ultimate non-blocking legal move fallback
+              // Ultimate non-blocking legal move fallback
               if (!result) {
-                const possibleMoves = chess.moves({ verbose: true });
+                const possibleMoves = liveChess.moves({ verbose: true });
                 if (possibleMoves.length > 0) {
-                  result = chess.move(possibleMoves[0]);
+                  result = liveChess.move(possibleMoves[0]);
                 }
               }
 
               if (result) {
-                const newFen = sanitizeAndValidateFen(chess.fen());
+                const newFen = sanitizeAndValidateFen(liveChess.fen());
                 gameFenHistoryRef.current = [...gameFenHistoryRef.current, newFen];
                 setGameFenHistory(gameFenHistoryRef.current);
                 setLastMove({ from: result.from, to: result.to });
-
-                // Render single tactical arrow
                 setBotArrow({ from: result.from, to: result.to });
+
+                if (typeof scoreCp === 'number') {
+                  setEvalScoreCp(scoreCp);
+                }
 
                 // Render ghost piece on origin square
                 setGhostPiece({
@@ -324,8 +428,8 @@ export default function App() {
                   color: result.color
                 });
 
-                // Play audio feedback
-                if (chess.inCheck()) {
+                // Audio feedback
+                if (liveChess.inCheck()) {
                   playChessSound('check');
                 } else if (result.captured) {
                   playChessSound('capture');
@@ -333,7 +437,7 @@ export default function App() {
                   playChessSound('move');
                 }
 
-                // Update move history
+                // Update move history & persist state
                 const record: MoveRecord = {
                   san: result.san,
                   from: result.from,
@@ -346,16 +450,17 @@ export default function App() {
                   fenBefore: currentFen,
                   fenAfter: newFen
                 };
-                setHistory((prev) => [...prev, record]);
+                setHistory((prev) => {
+                  const updated = [...prev, record];
+                  persistGameState(newFen, updated, personality, userColor);
+                  return updated;
+                });
 
                 checkGameOver();
-
-                // Trigger state update to dispatch next reactive turn
                 setFen(newFen);
               }
             } catch (err) {
               console.error('Error executing bot move:', err);
-              // 3. DO NOT recursively retry. Unlock board and show clear message.
               setIsBoardLocked(false);
               setToastMessage('Engine Error: Please make a manual move for the bot.');
               setTimeout(() => setToastMessage(null), 4000);
@@ -375,35 +480,34 @@ export default function App() {
         setTimeout(() => setToastMessage(null), 4000);
       }
     },
-    [chess, personality, checkGameOver]
+    [liveChess, personality, userColor, checkGameOver, persistGameState]
   );
 
   // =========================================================================
-  // 3. BREAK useEffect DEPENDENCY CYCLES (Strictly triggered once per distinct turn FEN)
+  // SURGICAL REACTIVE TURN DISPATCHER
   // =========================================================================
 
   useEffect(() => {
     if (isSetupModalOpen) return;
-    if (chess.isGameOver()) return;
+    if (liveChess.isGameOver()) return;
 
-    const currentFen = chess.fen();
-    const turn = chess.turn(); // 'w' or 'b'
+    const currentFen = liveChess.fen();
+    const turn = liveChess.turn(); // 'w' or 'b'
 
     if (userColor !== 'both' && turn === userColor) {
-      // Prevent duplicate triggers for the same position
       if (isEngineRunning.current || lastProcessedTurnFen.current === currentFen) {
         return;
       }
       lastProcessedTurnFen.current = currentFen;
 
       setIsBoardLocked(true);
-      setStatusText("🦁 LION thinking for " + (userColor === 'w' ? 'White' : 'Black'));
+      setStatusText(`${personality.name} thinking for ${userColor === 'w' ? 'White' : 'Black'}`);
       executeBotMoveFor(userColor);
     } else {
       setIsBoardLocked(false);
-      setStatusText("Your turn — input " + (userColor === 'w' ? 'Black' : 'White') + "'s move");
+      setStatusText(`Your turn — input ${userColor === 'w' ? 'Black' : 'White'}'s move`);
     }
-  }, [fen, userColor, isSetupModalOpen, chess, executeBotMoveFor]);
+  }, [fen, userColor, isSetupModalOpen, liveChess, personality, executeBotMoveFor]);
 
   // =========================================================================
   // USER INPUT (OPPONENT MOVES ONLY)
@@ -411,22 +515,21 @@ export default function App() {
 
   const handleOpponentMove = useCallback(
     (move: { from: string; to: string; promotion?: string }): boolean => {
-      const turn = chess.turn();
+      const turn = liveChess.turn();
 
-      // Rule: User is NEVER allowed to move during bot's turn or while engine is calculating
       if (userColor !== 'both' && turn === userColor) {
         return false;
       }
-      if (isEngineRunning.current) {
+      if (isEngineRunning.current || inspectedMoveIndex !== null) {
         return false;
       }
 
       try {
-        const currentFen = sanitizeAndValidateFen(chess.fen());
-        const result = applyAnyMove(chess, move);
+        const currentFen = sanitizeAndValidateFen(liveChess.fen());
+        const result = applyAnyMove(liveChess, move);
         if (!result) return false;
 
-        const newFen = sanitizeAndValidateFen(chess.fen());
+        const newFen = sanitizeAndValidateFen(liveChess.fen());
         gameFenHistoryRef.current = [...gameFenHistoryRef.current, newFen];
         setGameFenHistory(gameFenHistoryRef.current);
         setLastMove({ from: result.from, to: result.to });
@@ -434,7 +537,7 @@ export default function App() {
         setGhostPiece(null);
 
         // Sound feedback
-        if (chess.inCheck()) {
+        if (liveChess.inCheck()) {
           playChessSound('check');
         } else if (result.captured) {
           playChessSound('capture');
@@ -442,7 +545,11 @@ export default function App() {
           playChessSound('move');
         }
 
-        // Record history
+        // Fast local evaluation for eval bar
+        const quickEval = stockfishService.evaluateBoard(liveChess, 'w');
+        setEvalScoreCp(quickEval);
+
+        // Record history & persist state
         const record: MoveRecord = {
           san: result.san,
           from: result.from,
@@ -455,7 +562,11 @@ export default function App() {
           fenBefore: currentFen,
           fenAfter: newFen
         };
-        setHistory((prev) => [...prev, record]);
+        setHistory((prev) => {
+          const updated = [...prev, record];
+          persistGameState(newFen, updated, personality, userColor);
+          return updated;
+        });
 
         const gameOver = checkGameOver();
         setFen(newFen);
@@ -466,7 +577,7 @@ export default function App() {
         return false;
       }
     },
-    [chess, userColor, checkGameOver]
+    [liveChess, userColor, inspectedMoveIndex, checkGameOver, persistGameState, personality]
   );
 
   // God Mode FEN update handler
@@ -474,7 +585,7 @@ export default function App() {
     (newFen: string) => {
       try {
         const sanitized = sanitizeAndValidateFen(newFen);
-        chess.load(sanitized);
+        liveChess.load(sanitized);
         gameFenHistoryRef.current = [...gameFenHistoryRef.current, sanitized];
         setGameFenHistory(gameFenHistoryRef.current);
         setFen(sanitized);
@@ -486,7 +597,7 @@ export default function App() {
         console.error('Failed to apply god mode change:', err);
       }
     },
-    [chess, checkGameOver]
+    [liveChess, checkGameOver]
   );
 
   // Setup Modal Launch
@@ -499,8 +610,9 @@ export default function App() {
     }) => {
       const sanitized = sanitizeAndValidateFen(config.startingFen);
       stockfishService.reset();
-      chess.load(sanitized);
+      liveChess.load(sanitized);
 
+      setPersonality(config.personality);
       setUserColor(config.playerColor);
       setIsFlipped(config.playerColor === 'b');
 
@@ -512,14 +624,19 @@ export default function App() {
       setLastMove(null);
       setBotArrow(null);
       setGhostPiece(null);
+      setEvalScoreCp(0);
+      setInspectedMoveIndex(null);
       setToastMessage(null);
       setGameOverInfo({ isOver: false, title: '', description: '', winner: null });
       setIsSetupModalOpen(false);
 
+      // Save initial fresh state
+      localStorage.removeItem(SAVED_GAME_KEY);
+
       // Trigger the reactive dispatcher
       setFen(sanitized);
     },
-    [chess]
+    [liveChess]
   );
 
   // Open Main Menu: Stop engine, reset state, and reopen setup modal
@@ -536,6 +653,61 @@ export default function App() {
     setIsSetupModalOpen(true);
   }, []);
 
+  // 5. PGN Export Helper
+  const handleCopyPgn = useCallback(() => {
+    if (history.length === 0) return;
+    try {
+      const lines: string[] = [];
+      lines.push('[Event "Grandmaster AI Match"]');
+      lines.push(`[White "${userColor === 'w' ? personality.name : 'Human'}"]`);
+      lines.push(`[Black "${userColor === 'b' ? personality.name : 'Human'}"]`);
+      lines.push(`[Result "${gameOverInfo.isOver ? (gameOverInfo.winner === 'w' ? '1-0' : gameOverInfo.winner === 'b' ? '0-1' : '1/2-1/2') : '*'}"]`);
+      lines.push('');
+
+      let moveText = '';
+      for (let i = 0; i < history.length; i += 2) {
+        const moveNumber = Math.floor(i / 2) + 1;
+        const wMove = history[i].san;
+        const bMove = history[i + 1]?.san || '';
+        moveText += `${moveNumber}. ${wMove} ${bMove} `;
+      }
+      lines.push(moveText.trim());
+
+      const fullPgn = lines.join('\n');
+      navigator.clipboard.writeText(fullPgn);
+
+      setToastMessage('PGN copied to clipboard.');
+      setTimeout(() => setToastMessage(null), 2500);
+    } catch (err) {
+      console.warn('PGN copy failed:', err);
+    }
+  }, [history, userColor, personality, gameOverInfo]);
+
+  // 5. On-Demand Hint Generator
+  const handleRequestHint = useCallback(() => {
+    if (isBotThinking || isBoardLocked) return;
+    try {
+      const currentFen = sanitizeAndValidateFen(liveChess.fen());
+      const searchResult = stockfishService.calculateGrandmasterMove(currentFen, 3);
+      if (searchResult.move && searchResult.move.length >= 4) {
+        const from = searchResult.move.substring(0, 2);
+        const to = searchResult.move.substring(2, 4);
+        setBotArrow({ from, to });
+        setToastMessage(`Hint: ${from.toUpperCase()} ➔ ${to.toUpperCase()}`);
+        setTimeout(() => setToastMessage(null), 3500);
+      }
+    } catch (err) {
+      console.warn('Hint generation notice:', err);
+    }
+  }, [isBotThinking, isBoardLocked, liveChess]);
+
+  // Toggle Sound Setting
+  const handleToggleSound = useCallback(() => {
+    const next = !isSoundOn;
+    setIsSoundOn(next);
+    setSoundEnabled(next);
+  }, [isSoundOn]);
+
   return (
     <div className="relative min-h-screen bg-[#02040a] text-slate-100 flex flex-col justify-between overflow-x-hidden font-sans select-none">
       {/* 1.5s Animated Splash Screen */}
@@ -547,59 +719,71 @@ export default function App() {
         <div className="absolute bottom-[-10%] right-[15%] w-[450px] h-[450px] rounded-full bg-[#d4af37]/5 blur-[100px]" />
       </div>
 
-      {/* Sleek Minimalist Top Status Bar with Single Main Menu Button */}
+      {/* Top Header Status Bar */}
       <Header
         personality={personality}
         userColor={userColor}
-        activeTurn={chess.turn()}
+        activeTurn={liveChess.turn()}
         isEngineThinking={isBotThinking}
         onOpenMainMenu={handleOpenMainMenu}
       />
 
       {/* Main Focus Chess Arena */}
-      <main className="flex-1 flex flex-col items-center justify-center p-3 md:p-6 select-none z-10">
-        <div className="w-full max-w-[540px] flex flex-col items-center gap-3">
-          {/* Toast Notification for Timeout / Recovery */}
+      <main className="flex-1 flex flex-col items-center justify-center p-2 sm:p-4 md:p-6 select-none z-10">
+        <div className="w-full max-w-[560px] flex flex-col items-center gap-3">
+          {/* Toast Notification for Timeout / PGN / Recovery */}
           {toastMessage && (
             <div className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-amber-500/20 border border-amber-400/40 text-amber-200 text-xs font-semibold shadow-lg backdrop-blur-md animate-fade-in">
-              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+              <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
               <span>{toastMessage}</span>
             </div>
           )}
 
-          {/* Interactive 64-Square Chessboard */}
-          <ChessBoard
-            chess={chess}
-            isFlipped={isFlipped}
-            onOpponentMove={handleOpponentMove}
-            onGodModeBoardChange={handleGodModeBoardChange}
-            lastMove={lastMove}
-            botArrow={botArrow}
-            ghostPiece={ghostPiece}
-            isBotTurn={isBoardLocked}
-            isGameOver={gameOverInfo.isOver}
-            isGodModeUnlocked={isGodModeUnlocked}
-            setIsGodModeUnlocked={setIsGodModeUnlocked}
-          />
+          {/* Board & Live Eval Bar Container */}
+          <div className="w-full flex items-stretch justify-center gap-2 sm:gap-3">
+            {/* Live Gold Evaluation Bar */}
+            <EvalBar
+              scoreCp={evalScoreCp}
+              isFlipped={isFlipped}
+            />
 
-          {/* Minimal Status Hint Pill */}
-          <div className="w-full flex items-center justify-between px-4 py-2.5 rounded-2xl bg-[#0b101c]/80 border border-[#d4af37]/20 text-xs text-amber-100/70 shadow-md backdrop-blur-md">
-            <div className="flex items-center gap-2">
-              <span
-                className={`w-2.5 h-2.5 rounded-full ${
-                  isBoardLocked
-                    ? 'bg-amber-400 animate-ping'
-                    : 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]'
-                }`}
+            {/* Interactive 64-Square Chessboard */}
+            <div className="flex-1 max-w-[460px]">
+              <ChessBoard
+                chess={displayChess}
+                isFlipped={isFlipped}
+                onOpponentMove={handleOpponentMove}
+                onGodModeBoardChange={handleGodModeBoardChange}
+                lastMove={lastMove}
+                botArrow={botArrow}
+                ghostPiece={ghostPiece}
+                isBotTurn={isBoardLocked}
+                isGameOver={gameOverInfo.isOver}
+                isGodMode={isGodMode}
+                onToggleGodMode={() => setIsGodMode((prev) => !prev)}
+                isReadOnly={inspectedMoveIndex !== null}
+                showArrows={showArrows}
               />
-              <span className="font-medium text-amber-200/90">
-                {statusText}
-              </span>
-            </div>
-            <div className="text-[11px] text-amber-200/50 hidden sm:block">
-              Hold piece 500ms for God Mode
             </div>
           </div>
+
+          {/* Move History, PGN & Settings Controls Panel */}
+          <MoveHistoryPanel
+            history={history}
+            activeMoveIndex={inspectedMoveIndex}
+            onSelectMoveIndex={setInspectedMoveIndex}
+            onCopyPgn={handleCopyPgn}
+            onRequestHint={handleRequestHint}
+            onFlipBoard={() => setIsFlipped((prev) => !prev)}
+            isSoundOn={isSoundOn}
+            onToggleSound={handleToggleSound}
+            showArrows={showArrows}
+            onToggleArrows={() => setShowArrows((prev) => !prev)}
+            isGodMode={isGodMode}
+            onToggleGodMode={() => setIsGodMode((prev) => !prev)}
+            isThinking={isBotThinking}
+            isGameOver={gameOverInfo.isOver}
+          />
         </div>
       </main>
 
@@ -644,6 +828,8 @@ export default function App() {
       <StartupModal
         isOpen={isSetupModalOpen}
         onStartGame={handleStartGame}
+        savedGameAvailable={savedGameAvailable}
+        onResumeSavedGame={handleResumeSavedGame}
         onClose={history.length > 0 ? () => setIsSetupModalOpen(false) : undefined}
       />
     </div>

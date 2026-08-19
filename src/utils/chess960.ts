@@ -4,6 +4,7 @@
  * - Bishops must be on opposite-colored squares (one on light, one on dark).
  * - The King must be somewhere between the two Rooks.
  * - Black's back rank mirrors White's back rank.
+ * Note: Standard chess.js does not support 960 castling geometry, so castling rights are set to '-'.
  */
 export function generateChess960FEN(): string {
   const pieces = new Array(8).fill('');
@@ -51,7 +52,7 @@ export function generateChess960FEN(): string {
   // Generate White Rank string
   const whiteRank = pieces.join('');
   // Black rank is lower-case mirror
-  const blackRank = pieces.map(p => p.toLowerCase()).join('');
+  const blackRank = pieces.map((p) => p.toLowerCase()).join('');
 
-  return `${blackRank}/pppppppp/8/8/8/8/PPPPPPPP/${whiteRank} w KQkq - 0 1`;
+  return `${blackRank}/pppppppp/8/8/8/8/PPPPPPPP/${whiteRank} w - - 0 1`;
 }

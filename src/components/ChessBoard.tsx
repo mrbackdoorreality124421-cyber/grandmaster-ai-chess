@@ -15,8 +15,10 @@ interface ChessBoardProps {
   ghostPiece: { square: string; type: string; color: 'w' | 'b' } | null;
   isBotTurn: boolean;
   isGameOver: boolean;
-  isGodModeUnlocked: boolean;
-  setIsGodModeUnlocked: (val: boolean) => void;
+  isGodMode: boolean;
+  onToggleGodMode: () => void;
+  isReadOnly?: boolean;
+  showArrows?: boolean;
 }
 
 interface InteractionState {
@@ -39,7 +41,10 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   ghostPiece,
   isBotTurn,
   isGameOver,
-  setIsGodModeUnlocked
+  isGodMode,
+  onToggleGodMode,
+  isReadOnly = false,
+  showArrows = true
 }) => {
   const boardRef = useRef<HTMLDivElement>(null);
   const [selectedSquare, setSelectedSquare] = useState<Square | null>(null);
@@ -149,9 +154,6 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
     }
   };
 
-  /**
-   * 2. SAFE onDrop / MOVE EXECUTION (Prevents fatal exceptions & always defaults promotion to 'q')
-   */
   const executeSafeMove = useCallback(
     (sourceSquare: Square, targetSquare: Square, promotionPiece: string = 'q'): boolean => {
       try {
@@ -160,7 +162,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
         const isPawn = piece?.type === 'p';
         const isCapture = Boolean(targetPiece || (isPawn && sourceSquare[0] !== targetSquare[0]));
 
-        // Always promote to queen ('q') to prevent promotion dialog crashes
+        // Always promote to queen to prevent promotion dialog crashes
         const success = onOpponentMove({
           from: sourceSquare,
           to: targetSquare,
@@ -190,7 +192,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     try {
-      if (isBotTurn || isGameOver) return;
+      if (isBotTurn || isGameOver || isReadOnly) return;
       const square = getSquareFromCoords(e.clientX, e.clientY);
       if (!square) return;
 
@@ -201,7 +203,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
       if (piece) {
         clearLongPressTimer();
         longPressTimerRef.current = setTimeout(() => {
-          setIsGodModeUnlocked(true);
+          onToggleGodMode();
           setInteractionState((prev) => ({
             ...prev,
             isDragging: true,
@@ -272,9 +274,6 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
     }
   };
 
-  /**
-   * Safe onDrop Pointer Up (Never throws or corrupts state)
-   */
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     try {
       if (activePointerIdRef.current !== e.pointerId) return;
@@ -287,8 +286,8 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
 
       const destSquare = getSquareFromCoords(e.clientX, e.clientY);
 
-      // God Mode
-      if (currentInteraction.isGodMode && currentInteraction.originSquare) {
+      // God Mode Handling
+      if ((currentInteraction.isGodMode || isGodMode) && currentInteraction.originSquare) {
         if (currentInteraction.isOffBoard || !destSquare) {
           chess.remove(currentInteraction.originSquare);
           playChessSound('capture');
@@ -315,7 +314,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
         return;
       }
 
-      // Standard Opponent Move
+      // Standard Move
       if (
         currentInteraction.originSquare &&
         destSquare &&
@@ -326,7 +325,6 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
     } catch (error) {
       console.error('onDrop Error:', error);
     } finally {
-      // Always snap back and reset drag state safely
       setInteractionState({
         isDragging: false,
         isGodMode: false,
@@ -361,8 +359,8 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   const renderedRanks = isFlipped ? [...displayRanks].reverse() : displayRanks;
 
   return (
-    <div className="relative w-full max-w-[480px] aspect-square mx-auto select-none touch-none p-1">
-      {/* Board Container with Luxury Obsidian Gold Border & Glow */}
+    <div className="relative w-full max-w-[460px] aspect-square mx-auto select-none touch-none">
+      {/* Board Container with Luxury Obsidian Gold Border & Shadow */}
       <div
         ref={boardRef}
         onPointerDown={handlePointerDown}
@@ -371,10 +369,10 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
         onPointerCancel={handlePointerCancel}
         style={{
           touchAction: 'none',
-          filter: isGameOver ? 'brightness(0.4)' : undefined
+          filter: isGameOver ? 'brightness(0.5)' : undefined
         }}
-        className={`relative w-full h-full grid grid-cols-8 grid-rows-8 rounded-2xl overflow-hidden shadow-[0_12px_40px_rgba(0,0,0,0.85)] border-2 border-[#d4af37]/35 bg-[#050814] transition-all duration-300 ${
-          isBotTurn || isGameOver ? 'pointer-events-none cursor-wait' : ''
+        className={`relative w-full h-full grid grid-cols-8 grid-rows-8 rounded-2xl overflow-hidden shadow-[0_12px_45px_rgba(0,0,0,0.85)] border-2 border-[#d4af37]/40 bg-[#050814] transition-all duration-300 ${
+          isBotTurn || isGameOver || isReadOnly ? 'cursor-default' : ''
         }`}
       >
         {renderedRanks.map((rank) =>
@@ -386,7 +384,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
             const isLastMoveFrom = lastMove?.from === square;
             const isLastMoveTo = lastMove?.to === square;
             const isKingInCheck = inCheckSquare === square;
-            const isGodHovered = interactionState.hoverSquare === square && interactionState.isGodMode;
+            const isGodHovered = interactionState.hoverSquare === square && (interactionState.isGodMode || isGodMode);
 
             const isGhostSquare = ghostPiece && ghostPiece.square === square;
 
@@ -450,7 +448,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
         )}
 
         {/* Tactical Recommendation Red Vector Arrow */}
-        {botArrow && (
+        {showArrows && botArrow && (
           <TacticalArrows
             arrow={botArrow}
             boardRef={boardRef}
@@ -470,7 +468,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
             zIndex: 9999
           }}
           className={`w-14 h-14 md:w-16 md:h-16 ${
-            interactionState.isGodMode ? 'drop-shadow-[0_0_15px_rgba(212,175,55,1)]' : 'drop-shadow-2xl'
+            interactionState.isGodMode || isGodMode ? 'drop-shadow-[0_0_15px_rgba(212,175,55,1)]' : 'drop-shadow-2xl'
           }`}
         >
           <ChessPieceSvg

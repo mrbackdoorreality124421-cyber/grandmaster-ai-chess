@@ -7,10 +7,12 @@ export interface AIPersonality {
   rating: number;
   depth: number;
   moveTimeMs: number;
-  skillLevel: number;
+  skillLevel: number; // 0-20
   threads: number;
   hash: number;
-  contempt: number;
+  contempt: number; // -100 to 100
+  blunderRate: number; // 0 to 1
+  localSearchDepth: number; // 1 to 4
   icon: string;
   badge: string;
   tagline: string;
@@ -35,4 +37,14 @@ export interface MoveRecord {
   flags: string;
   fenBefore: string;
   fenAfter: string;
+}
+
+export interface SavedGameState {
+  version: number;
+  fen: string;
+  history: MoveRecord[];
+  personalityId: string;
+  userColor: PlayerColor;
+  isFlipped: boolean;
+  timestamp: number;
 }

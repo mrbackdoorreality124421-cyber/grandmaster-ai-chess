@@ -1,8 +1,17 @@
-// Ultra-stable Web Audio Engine with strict throttling to prevent sound loops
+// Ultra-stable Web Audio Engine with strict throttling and mute toggle
 
 let audioCtx: AudioContext | null = null;
 let lastSoundPlayTime = 0;
 const THROTTLE_MS = 120;
+let soundEnabled = true;
+
+export function setSoundEnabled(enabled: boolean) {
+  soundEnabled = enabled;
+}
+
+export function isSoundEnabled(): boolean {
+  return soundEnabled;
+}
 
 function getAudioContext(): AudioContext | null {
   if (typeof window === 'undefined') return null;
@@ -25,9 +34,11 @@ function getAudioContext(): AudioContext | null {
 }
 
 export function playChessSound(type: 'move' | 'capture' | 'check' | 'win' | 'illegal') {
+  if (!soundEnabled) return;
+
   const now = Date.now();
   if (now - lastSoundPlayTime < THROTTLE_MS && type !== 'win') {
-    return; // Strict throttling to prevent machine-gun audio spam
+    return; // Strict throttling to prevent audio spam
   }
   lastSoundPlayTime = now;
 
