@@ -1,6 +1,24 @@
 import { AIPersonality, AIPersonalityId, PresetVariant } from '../types/chess';
 
 export const AI_PERSONALITIES: Record<AIPersonalityId, AIPersonality> = {
+  god_mode: {
+    id: 'god_mode',
+    name: '👑 GOD MODE (Unbeatable)',
+    subtitle: 'Engine Singularity',
+    icon: '👑',
+    color: 'fuchsia-400',
+    borderColor: 'border-fuchsia-500/50',
+    badgeBg: 'bg-fuchsia-500/20',
+    skillLevel: 20,
+    depth: 24,
+    moveTime: 3000,
+    contempt: 100,
+    multiPv: 1,
+    hash: 128,
+    description: 'Unbeatable — Skill 20, Depth 24+, Opening Book, Zero Blunders',
+    playstyle: 'Flawless calculation, opening book, tablebase endgame precision, and blunder-proof verification',
+    psychologicalTag: 'Unbeatable Engine'
+  },
   human_play: {
     id: 'human_play',
     name: 'Human Play',

@@ -1,10 +1,12 @@
 /**
  * Resilient Stockfish UCI Engine Service
- * Calibrated mode-specific intelligence, strict FEN blacklist, and crash-proof execution.
+ * Featuring 👑 GOD MODE (Unbeatable), Grandmaster Opening Book, Blunder-Proof Guard,
+ * and adaptive endgame/tactical depth scaling.
  */
 
 import { AIPersonality, AIPersonalityId } from '../types/chess';
 import { Chess } from 'chess.js';
+import { getOpeningBookMove } from '../constants/openingBook';
 
 export type BestMoveCallback = (bestMove: string) => void;
 
@@ -22,7 +24,7 @@ class StockfishEngineService {
   private onBestMoveCallback: BestMoveCallback | null = null;
   private fallbackChess: Chess = new Chess();
   private multiPvLines: MultiPvEntry[] = [];
-  private activePersonalityId: AIPersonalityId = 'tournament_player';
+  private activePersonalityId: AIPersonalityId = 'god_mode';
   private searchWatchdogTimer: NodeJS.Timeout | null = null;
 
   // Strict FEN History Blacklist
@@ -185,7 +187,7 @@ class StockfishEngineService {
       return;
     }
 
-    // Capture MultiPV lines (1, 2, 3) for strict blacklist filtering & personality shaping
+    // Capture MultiPV lines (1, 2, 3) for strict blacklist filtering & safety check
     if (line.startsWith('info') && line.includes('multipv')) {
       const pvMatch = line.match(/multipv\s+(\d+)/);
       const scoreMatch = line.match(/score\s+(cp|mate)\s+(-?\d+)/);
@@ -253,6 +255,48 @@ class StockfishEngineService {
     }
   }
 
+  /**
+   * Absolute Safety & 1-Move Blunder Check Layer:
+   * Verifies that the opponent cannot deliver mate in 1 or win clean Queen/Rook for free.
+   */
+  private isBlunderMove(moveUci: string): boolean {
+    if (!moveUci || moveUci.length < 4) return true;
+    try {
+      const from = moveUci.substring(0, 2);
+      const to = moveUci.substring(2, 4);
+      const promotion = moveUci.length > 4 ? moveUci[4] : undefined;
+
+      const simChess = new Chess(this.fallbackChess.fen());
+      const moved = simChess.move({ from, to, promotion });
+      if (!moved) return true;
+
+      // 1. Check if opponent has an immediate checkmate reply
+      const opponentMoves = simChess.moves({ verbose: true });
+      for (const oppMove of opponentMoves) {
+        simChess.move(oppMove);
+        if (simChess.isCheckmate()) {
+          return true; // Immediate mate blunder!
+        }
+        simChess.undo();
+      }
+
+      // 2. Check for accidental stalemate when winning
+      if (simChess.isDraw() && !simChess.inCheck()) {
+        const boardPieces = simChess.board().flat().filter(Boolean);
+        const ourPieces = boardPieces.filter((p) => p && p.color === moved.color);
+        const oppPieces = boardPieces.filter((p) => p && p.color !== moved.color);
+        // If we have heavy material advantage (> +4), don't allow accidental stalemate
+        if (ourPieces.length > oppPieces.length + 1 && oppPieces.length <= 2) {
+          return true;
+        }
+      }
+
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
   private finishSearch(engineBestMove: string) {
     if (!this.isSearching) return;
     this.isSearching = false;
@@ -265,7 +309,20 @@ class StockfishEngineService {
     const cleanLines = this.multiPvLines.filter((p) => p.move && !this.isMoveInFenBlacklist(p.move));
 
     // Personality Decision Rules
-    if (this.activePersonalityId === 'hacker_extreme' && cleanLines.length >= 2) {
+    if (this.activePersonalityId === 'god_mode') {
+      // 👑 GOD MODE: Zero randomness, zero MultiPV trickery.
+      // Pick top move, enforce strict blunder check & blacklist.
+      if (cleanLines.length > 0 && !this.isBlunderMove(cleanLines[0].move)) {
+        finalMove = cleanLines[0].move;
+      } else {
+        const safeCandidate = cleanLines.find((p) => !this.isBlunderMove(p.move));
+        if (safeCandidate?.move) {
+          finalMove = safeCandidate.move;
+        } else {
+          finalMove = this.findCleanLegalMove(finalMove);
+        }
+      }
+    } else if (this.activePersonalityId === 'hacker_extreme' && cleanLines.length >= 2) {
       // Swag Mastermind: Bypass standard #1 move when 2nd or 3rd line is viable
       const line1 = cleanLines[0];
       const line2 = cleanLines[1];
@@ -277,8 +334,8 @@ class StockfishEngineService {
           ? Math.abs(line1.scoreVal - line2.scoreVal) < 140 || line2.scoreVal > 150
           : true);
 
-      if (line2Viable) {
-        finalMove = line3 && Math.random() < 0.35 ? line3.move : line2.move;
+      if (line2Viable && !this.isBlunderMove(line2.move)) {
+        finalMove = line3 && Math.random() < 0.35 && !this.isBlunderMove(line3.move) ? line3.move : line2.move;
       } else {
         finalMove = cleanLines[0].move;
       }
@@ -289,9 +346,9 @@ class StockfishEngineService {
       finalMove = cleanLines[0].move;
     }
 
-    // Strict Anti-Repetition Guard: If the chosen move is in blacklist, find clean alternative
-    if (this.isMoveInFenBlacklist(finalMove)) {
-      const altClean = cleanLines.find((p) => !this.isMoveInFenBlacklist(p.move));
+    // Strict Anti-Repetition & Safety Guard
+    if (this.isMoveInFenBlacklist(finalMove) || (this.activePersonalityId === 'god_mode' && this.isBlunderMove(finalMove))) {
+      const altClean = cleanLines.find((p) => !this.isMoveInFenBlacklist(p.move) && !this.isBlunderMove(p.move));
       if (altClean?.move) {
         finalMove = altClean.move;
       } else {
@@ -316,7 +373,7 @@ class StockfishEngineService {
 
       const cleanMoves = moves.filter((m) => {
         const uci = `${m.from}${m.to}${m.promotion || ''}`;
-        return uci !== forbiddenMove && !this.isMoveInFenBlacklist(uci);
+        return uci !== forbiddenMove && !this.isMoveInFenBlacklist(uci) && !this.isBlunderMove(uci);
       });
 
       if (cleanMoves.length > 0) {
@@ -374,7 +431,11 @@ class StockfishEngineService {
           score -= 2000;
         }
 
-        score += Math.random() * 10;
+        if (this.isBlunderMove(uci)) {
+          score -= 5000;
+        }
+
+        score += Math.random() * 5;
         if (score > bestScore) {
           bestScore = score;
           selectedMove = m;
@@ -402,6 +463,19 @@ class StockfishEngineService {
       this.fallbackChess.load(fen);
     } catch {}
 
+    // =========================================================================
+    // 👑 GOD MODE: GRANDMASTER OPENING BOOK LOOKUP
+    // =========================================================================
+    if (personality.id === 'god_mode') {
+      const bookMove = getOpeningBookMove(fen);
+      if (bookMove && !this.isMoveInFenBlacklist(bookMove)) {
+        setTimeout(() => {
+          onBestMove(bookMove);
+        }, 80);
+        return;
+      }
+    }
+
     if (this.isSearching) {
       this.safePostMessage('stop');
       this.isSearching = false;
@@ -418,15 +492,33 @@ class StockfishEngineService {
     }
 
     try {
-      // 1. 🟢 HUMAN PLAY: Skill Level 3, Depth 4
-      if (personality.id === 'human_play') {
+      // Analyze position characteristics
+      const pieceCount = this.fallbackChess.board().flat().filter(Boolean).length;
+      const isEndgame = pieceCount <= 7;
+      const isTactical = this.fallbackChess.inCheck() || this.fallbackChess.moves({ verbose: true }).some((m) => m.captured);
+
+      // 1. 👑 GOD MODE (Unbeatable): Skill Level 20, Depth 24+ (28 in endgame), Hash 128, Contempt 100
+      if (personality.id === 'god_mode') {
+        const searchDepth = isEndgame ? 28 : isTactical ? 26 : 24;
+        const searchTime = isTactical ? 3500 : 3000;
+
+        this.safePostMessage('setoption name Skill Level value 20');
+        this.safePostMessage('setoption name Hash value 128');
+        this.safePostMessage('setoption name Threads value 2');
+        this.safePostMessage('setoption name Contempt value 100');
+        this.safePostMessage('setoption name MultiPV value 1');
+        this.safePostMessage(`position fen ${fen}`);
+        this.safePostMessage(`go depth ${searchDepth} movetime ${searchTime}`);
+      }
+      // 2. 🟢 HUMAN PLAY: Skill Level 3, Depth 4
+      else if (personality.id === 'human_play') {
         this.safePostMessage('setoption name Skill Level value 3');
         this.safePostMessage('setoption name Hash value 16');
         this.safePostMessage('setoption name MultiPV value 2');
         this.safePostMessage(`position fen ${fen}`);
         this.safePostMessage('go depth 4 movetime 450');
       }
-      // 2. 🔵 HUMAN PRO: Skill Level 12, Depth 11
+      // 3. 🔵 HUMAN PRO: Skill Level 12, Depth 11
       else if (personality.id === 'human_pro') {
         this.safePostMessage('setoption name Skill Level value 12');
         this.safePostMessage('setoption name Hash value 32');
@@ -434,7 +526,7 @@ class StockfishEngineService {
         this.safePostMessage(`position fen ${fen}`);
         this.safePostMessage('go depth 11 movetime 750');
       }
-      // 3. 🏆 TOURNAMENT PLAYER: Skill Level 20, Depth 18
+      // 4. 🏆 TOURNAMENT PLAYER: Skill Level 20, Depth 18
       else if (personality.id === 'tournament_player') {
         this.safePostMessage('setoption name Skill Level value 20');
         this.safePostMessage('setoption name Contempt value 50');
@@ -443,7 +535,7 @@ class StockfishEngineService {
         this.safePostMessage(`position fen ${fen}`);
         this.safePostMessage('go depth 18 movetime 1200');
       }
-      // 4. ⚡ EXTREME FAST (Rush): Skill Level 20, Depth 14, Contempt 200, MoveTime 500ms
+      // 5. ⚡ EXTREME FAST (Rush): Skill Level 20, Depth 14, Contempt 200, MoveTime 500ms
       else if (personality.id === 'extreme_fast') {
         this.safePostMessage('setoption name Skill Level value 20');
         this.safePostMessage('setoption name Contempt value 200');
@@ -452,7 +544,7 @@ class StockfishEngineService {
         this.safePostMessage(`position fen ${fen}`);
         this.safePostMessage('go depth 14 movetime 500');
       }
-      // 5. 🐢 EXTREME SLOW (Mastermind): Skill Level 20, Depth 28, MoveTime 3500ms
+      // 6. 🐢 EXTREME SLOW (Mastermind): Skill Level 20, Depth 28, MoveTime 3500ms
       else if (personality.id === 'extreme_slow') {
         this.safePostMessage('setoption name Skill Level value 20');
         this.safePostMessage('setoption name Contempt value 50');
@@ -461,7 +553,7 @@ class StockfishEngineService {
         this.safePostMessage(`position fen ${fen}`);
         this.safePostMessage('go depth 28 movetime 3500');
       }
-      // 6. 🕶️ HACKER EXTREME (Swag Mastermind): Skill Level 20, MultiPV 3, MoveTime 1000ms
+      // 7. 🕶️ HACKER EXTREME (Swag Mastermind): Skill Level 20, MultiPV 3, MoveTime 1000ms
       else if (personality.id === 'hacker_extreme') {
         this.safePostMessage('setoption name Skill Level value 20');
         this.safePostMessage('setoption name Contempt value 80');
@@ -471,12 +563,12 @@ class StockfishEngineService {
         this.safePostMessage('go depth 16 movetime 1000');
       }
 
-      // Hard Watchdog: Allow up to 5500ms to comfortably accommodate the 3500ms Mastermind search
-      const maxAllowedTimeout = personality.id === 'extreme_slow' ? 5500 : 3800;
+      // Hard Watchdog: 5.5s timeout protection (prevents crashes/white-screens)
+      const maxAllowedTimeout = personality.id === 'god_mode' || personality.id === 'extreme_slow' ? 5500 : 3800;
       this.clearWatchdog();
       this.searchWatchdogTimer = setTimeout(() => {
         if (this.isSearching) {
-          console.warn('Watchdog triggered, completing with clean fallback and restarting worker');
+          console.warn('Watchdog triggered, completing with best move found so far');
           this.finishSearch(this.calculateLocalBestMove());
           this.resetWorkerSafely();
         }

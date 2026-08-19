@@ -4,7 +4,8 @@ export type AIPersonalityId =
   | 'tournament_player'
   | 'extreme_fast'
   | 'extreme_slow'
-  | 'hacker_extreme';
+  | 'hacker_extreme'
+  | 'god_mode';
 
 export interface AIPersonality {
   id: AIPersonalityId;
