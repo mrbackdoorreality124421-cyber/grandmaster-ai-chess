@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">
+  <defs>
+    <linearGradient id="bgGrad192" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#020617" />
+    </linearGradient>
+    <linearGradient id="goldGrad192" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24" />
+      <stop offset="100%" stop-color="#d97706" />
+    </linearGradient>
+  </defs>
+  <rect width="192" height="192" rx="42" fill="url(#bgGrad192)" />
+  <g transform="translate(40, 30) scale(0.22)">
+    <path d="M 200,60 L 230,120 L 260,70 L 290,120 L 320,60 L 300,160 L 220,160 Z" fill="url(#goldGrad192)" />
+    <path d="M 330,180 C 330,180 320,130 270,120 C 220,110 200,140 180,180 C 160,220 120,240 120,280 C 120,330 150,360 190,360 C 180,380 170,410 170,440 L 350,440 C 350,400 350,340 330,300 C 310,260 330,220 330,180 Z" fill="#f8fafc" />
+    <path d="M 190,230 A 15,15 0 1,1 190,200 A 15,15 0 1,1 190,230 Z" fill="#0f172a" />
+    <path d="M 160,290 C 180,280 220,280 240,310" stroke="#0f172a" stroke-width="12" stroke-linecap="round" fill="none" />
+    <path d="M 270,170 C 270,220 230,260 190,270" stroke="#0f172a" stroke-width="10" stroke-linecap="round" fill="none" />
+    <rect x="140" y="440" width="240" height="40" rx="12" fill="url(#goldGrad192)" />
+  </g>
+</svg>

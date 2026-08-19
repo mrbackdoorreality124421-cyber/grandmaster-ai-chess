@@ -1,0 +1,142 @@
+import { AIPersonality, AIPersonalityId, PresetVariant } from '../types/chess';
+
+export const AI_PERSONALITIES: Record<AIPersonalityId, AIPersonality> = {
+  human_play: {
+    id: 'human_play',
+    name: 'Human Play',
+    subtitle: 'Smart Beginner',
+    icon: '🟢',
+    color: 'emerald-400',
+    borderColor: 'border-emerald-500/40',
+    badgeBg: 'bg-emerald-500/15',
+    skillLevel: 3,
+    depth: 4,
+    moveTime: 450,
+    contempt: 0,
+    multiPv: 2,
+    hash: 16,
+    description: 'Skill Level 3, Depth 4. Natural human development with realistic minor oversights.',
+    playstyle: 'Natural casual moves with realistic human tempo',
+    psychologicalTag: 'Smart Beginner'
+  },
+  human_pro: {
+    id: 'human_pro',
+    name: 'Human Pro',
+    subtitle: 'Club Expert',
+    icon: '🔵',
+    color: 'blue-400',
+    borderColor: 'border-blue-500/40',
+    badgeBg: 'bg-blue-500/15',
+    skillLevel: 12,
+    depth: 11,
+    moveTime: 750,
+    contempt: 20,
+    multiPv: 2,
+    hash: 32,
+    description: 'Skill Level 12, Depth 11. Solid club tournament accuracy and positional strength.',
+    playstyle: 'Solid positional play and disciplined fundamentals',
+    psychologicalTag: 'Club Expert'
+  },
+  tournament_player: {
+    id: 'tournament_player',
+    name: 'Tournament Player',
+    subtitle: 'Grandmaster Precision',
+    icon: '🏆',
+    color: 'amber-400',
+    borderColor: 'border-amber-500/40',
+    badgeBg: 'bg-amber-500/15',
+    skillLevel: 20,
+    depth: 18,
+    moveTime: 1200,
+    contempt: 50,
+    multiPv: 2,
+    hash: 64,
+    description: 'Skill Level 20, Depth 18. Razor-sharp tactical precision with zero margin for error.',
+    playstyle: 'Flawless calculation and ruthless tactical punishment',
+    psychologicalTag: 'Grandmaster'
+  },
+  extreme_fast: {
+    id: 'extreme_fast',
+    name: 'Extreme Fast (Rush)',
+    subtitle: 'Speed Aggressor',
+    icon: '⚡',
+    color: 'cyan-400',
+    borderColor: 'border-cyan-500/40',
+    badgeBg: 'bg-cyan-500/15',
+    skillLevel: 20,
+    depth: 14,
+    moveTime: 500,
+    contempt: 200,
+    multiPv: 2,
+    hash: 32,
+    description: 'Skill Level 20, Depth 14, Contempt 200, MoveTime 500ms. Hyper-aggressive blitz attacks.',
+    playstyle: 'Relentless king attacks, rapid sacrifices, and mate chases',
+    psychologicalTag: 'Speed Aggressor'
+  },
+  extreme_slow: {
+    id: 'extreme_slow',
+    name: 'Extreme Slow (Mastermind)',
+    subtitle: 'Deep Calculator',
+    icon: '🐢',
+    color: 'purple-400',
+    borderColor: 'border-purple-500/40',
+    badgeBg: 'bg-purple-500/15',
+    skillLevel: 20,
+    depth: 28,
+    moveTime: 3500,
+    contempt: 50,
+    multiPv: 2,
+    hash: 64,
+    description: 'Skill Level 20, Depth 28, MoveTime 3500ms. Deep exhaustive positional analysis.',
+    playstyle: 'Deep exhaustive grandmaster calculation with immaculate endgame technique',
+    psychologicalTag: 'Mastermind'
+  },
+  hacker_extreme: {
+    id: 'hacker_extreme',
+    name: 'Hacker Extreme',
+    subtitle: 'Swag Mastermind',
+    icon: '🕶️',
+    color: 'rose-400',
+    borderColor: 'border-rose-500/40',
+    badgeBg: 'bg-rose-500/15',
+    skillLevel: 20,
+    depth: 16,
+    moveTime: 1000,
+    contempt: 80,
+    multiPv: 3,
+    hash: 64,
+    description: 'Skill Level 20, MultiPV 3. Bypasses standard lines to play unorthodox, psychological master moves.',
+    playstyle: 'Unorthodox, psychologically jarring yet tactically sound moves',
+    psychologicalTag: 'Chaos Mastermind'
+  }
+};
+
+export const PRESET_VARIANTS: PresetVariant[] = [
+  {
+    id: 'standard',
+    name: 'Standard Game',
+    category: 'standard',
+    description: 'Official FIDE standard starting position',
+    fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+    icon: '♟️',
+    whiteTurn: true
+  },
+  {
+    id: 'endgame_queen',
+    name: 'Queen & Pawn Endgame',
+    category: 'endgame',
+    description: 'Precision queen and king technical endgame',
+    fen: '8/6k1/8/8/4P3/8/5Q2/6K1 w - - 0 1',
+    icon: '♛',
+    whiteTurn: true
+  },
+  {
+    id: 'tactical_puzzle',
+    name: 'Greek Gift Sacrifice',
+    category: 'puzzle',
+    description: 'Classic Bxh7+ kingside attacking puzzle',
+    fen: 'r1bq1rk1/ppp2ppp/2n1pn2/3p4/2PP4/2NBPN2/PP3PPP/R1BQK2R w KQ - 4 7',
+    icon: '🎯',
+    whiteTurn: true
+  }
+];

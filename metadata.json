@@ -1,0 +1,6 @@
+{
+  "name": "Grandmaster AI: Zero-Latency Chess Assistant & Master Solver",
+  "description": "Premium zero-latency WebAssembly Stockfish chess engine, God-Mode board manipulation, live evaluation bar, tactical arrow visualization, and adaptive AI personalities.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
