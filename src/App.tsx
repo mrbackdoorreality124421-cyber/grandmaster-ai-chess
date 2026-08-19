@@ -11,8 +11,12 @@ import { playChessSound } from './utils/audio';
 import { Header } from './components/Header';
 import { ChessBoard } from './components/ChessBoard';
 import { StartupModal } from './components/StartupModal';
+import { SplashScreen } from './components/SplashScreen';
 
 export default function App() {
+  // Splash Screen State
+  const [showSplash, setShowSplash] = useState<boolean>(true);
+
   // Core Chess State
   const [chess] = useState(() => new Chess());
   const [history, setHistory] = useState<MoveRecord[]>([]);
@@ -24,7 +28,7 @@ export default function App() {
   const [ghostPiece, setGhostPiece] = useState<{ square: string; type: string; color: 'w' | 'b' } | null>(null);
 
   // Configuration
-  const [personality, setPersonality] = useState<AIPersonality>(AI_PERSONALITIES.tournament_player);
+  const [personality, setPersonality] = useState<AIPersonality>(AI_PERSONALITIES.lion_mode);
   const [activeVariant, setActiveVariant] = useState<PresetVariant>(PRESET_VARIANTS[0]);
   const [playerColor, setPlayerColor] = useState<PlayerColor>('w');
   const [isFlipped, setIsFlipped] = useState<boolean>(false);
@@ -57,7 +61,12 @@ export default function App() {
         winner
       });
       playChessSound('win');
-      confetti({ particleCount: 150, spread: 80, origin: { y: 0.55 } });
+      confetti({
+        particleCount: 160,
+        spread: 85,
+        origin: { y: 0.55 },
+        colors: ['#d4af37', '#f59e0b', '#fbbf24', '#ffffff', '#e2e8f0']
+      });
       return true;
     } else if (chess.isDraw()) {
       let desc = 'The game ended in a draw.';
@@ -79,224 +88,237 @@ export default function App() {
   // BOT COUNTER-MOVE EXECUTION (WITH FEN BLACKLIST FILTER)
   // =========================================================================
 
-  const executeBotCounterMove = useCallback((currentFenHistory?: string[]) => {
-    if (chess.isGameOver() || isBotThinkingRef.current) return;
+  const executeBotCounterMove = useCallback(
+    (currentFenHistory?: string[]) => {
+      if (chess.isGameOver() || isBotThinkingRef.current) return;
 
-    isBotThinkingRef.current = true;
-    setIsBotTurn(true);
+      isBotThinkingRef.current = true;
+      setIsBotTurn(true);
 
-    const currentFen = chess.fen();
-    const activeFenHistory = currentFenHistory || gameFenHistory;
+      const currentFen = chess.fen();
+      const activeFenHistory = currentFenHistory || gameFenHistory;
 
-    stockfishService.calculateMove(
-      currentFen,
-      personality,
-      activeFenHistory,
-      (bestMoveStr) => {
-        if (!bestMoveStr || bestMoveStr.length < 4) {
-          isBotThinkingRef.current = false;
-          setIsBotTurn(false);
-          return;
-        }
-
-        const from = bestMoveStr.substring(0, 2) as Square;
-        const to = bestMoveStr.substring(2, 4) as Square;
-        const promotion = bestMoveStr.length > 4 ? bestMoveStr[4] : undefined;
-
-        const movingPiece = chess.get(from);
-
-        try {
-          const moveResult = chess.move({ from, to, promotion });
-          if (moveResult) {
-            if (moveResult.captured) {
-              playChessSound('capture');
-            } else if (moveResult.flags.includes('k') || moveResult.flags.includes('q')) {
-              playChessSound('castle');
-            } else if (moveResult.flags.includes('p')) {
-              playChessSound('promote');
-            } else if (chess.inCheck()) {
-              playChessSound('check');
-            } else {
-              playChessSound('move');
-            }
-
-            setLastMove({ from, to });
-            setBotArrow({ from, to });
-            if (movingPiece) {
-              setGhostPiece({ square: from, type: movingPiece.type, color: movingPiece.color });
-            }
-
-            const nextFen = chess.fen();
-            const newRecord: MoveRecord = {
-              san: moveResult.san,
-              from,
-              to,
-              piece: moveResult.piece,
-              color: moveResult.color,
-              captured: moveResult.captured,
-              promotion: moveResult.promotion,
-              flags: moveResult.flags,
-              fenBefore: currentFen,
-              fenAfter: nextFen
-            };
-
-            setHistory((prev) => [...prev, newRecord]);
-            setGameFenHistory((prev) => [...prev, nextFen]);
-            checkGameOver();
+      stockfishService.calculateMove(
+        currentFen,
+        personality,
+        activeFenHistory,
+        (bestMoveStr) => {
+          if (!bestMoveStr || bestMoveStr.length < 4) {
+            isBotThinkingRef.current = false;
+            setIsBotTurn(false);
+            return;
           }
-        } catch (err) {
-          console.warn('Bot move error caught:', err);
-        } finally {
-          isBotThinkingRef.current = false;
-          setIsBotTurn(false);
+
+          try {
+            const from = bestMoveStr.substring(0, 2) as Square;
+            const to = bestMoveStr.substring(2, 4) as Square;
+            const promotion = bestMoveStr.length > 4 ? bestMoveStr[4] : undefined;
+
+            const pieceOnFrom = chess.get(from);
+
+            // Execute the recommended move for our side
+            const result = chess.move({ from, to, promotion });
+            if (result) {
+              const newFen = chess.fen();
+              setGameFenHistory((prev) => [...prev, newFen]);
+              setLastMove({ from, to });
+
+              // Render single tactical arrow
+              setBotArrow({ from, to });
+
+              // Render ghost piece on origin square
+              if (pieceOnFrom) {
+                setGhostPiece({
+                  square: from,
+                  type: pieceOnFrom.type,
+                  color: pieceOnFrom.color
+                });
+              }
+
+              // Play audio feedback
+              if (chess.inCheck()) {
+                playChessSound('check');
+              } else if (result.captured) {
+                playChessSound('capture');
+              } else {
+                playChessSound('move');
+              }
+
+              // Update move history
+              const record: MoveRecord = {
+                san: result.san,
+                from: result.from,
+                to: result.to,
+                piece: result.piece,
+                color: result.color,
+                captured: result.captured,
+                promotion: result.promotion,
+                flags: result.flags,
+                fenBefore: currentFen,
+                fenAfter: newFen
+              };
+              setHistory((prev) => [...prev, record]);
+
+              checkGameOver();
+            }
+          } catch (err) {
+            console.error('Error applying bot move:', err);
+          } finally {
+            isBotThinkingRef.current = false;
+            setIsBotTurn(false);
+          }
         }
-      }
-    );
-  }, [chess, personality, gameFenHistory, checkGameOver]);
+      );
+    },
+    [chess, personality, gameFenHistory, checkGameOver]
+  );
 
   // =========================================================================
-  // USER INPUTS OPPONENT MOVE
+  // USER INPUT (OPPONENT MOVES)
   // =========================================================================
 
   const handleOpponentMove = useCallback(
     (move: { from: string; to: string; promotion?: string }): boolean => {
-      if (isBotThinkingRef.current || gameOverInfo.isOver) return false;
+      if (isBotThinkingRef.current || isBotTurn) return false;
 
       try {
-        const fenBefore = chess.fen();
-        const moveResult = chess.move({
-          from: move.from as Square,
-          to: move.to as Square,
-          promotion: move.promotion || 'q'
-        });
+        const currentFen = chess.fen();
+        const result = chess.move(move);
+        if (!result) return false;
 
-        if (!moveResult) return false;
+        const newFen = chess.fen();
+        const updatedFenHistory = [...gameFenHistory, newFen];
+        setGameFenHistory(updatedFenHistory);
+        setLastMove({ from: move.from, to: move.to });
 
-        if (moveResult.captured) {
-          playChessSound('capture');
-        } else if (moveResult.flags.includes('k') || moveResult.flags.includes('q')) {
-          playChessSound('castle');
-        } else if (moveResult.flags.includes('p')) {
-          playChessSound('promote');
-        } else if (chess.inCheck()) {
+        // Clear previous bot indicators
+        setBotArrow(null);
+        setGhostPiece(null);
+
+        // Sound Feedback
+        if (chess.inCheck()) {
           playChessSound('check');
+        } else if (result.captured) {
+          playChessSound('capture');
         } else {
           playChessSound('move');
         }
 
-        const nextFen = chess.fen();
-        setLastMove({ from: move.from, to: move.to });
-        setBotArrow(null);
-        setGhostPiece(null);
-
-        const newRecord: MoveRecord = {
-          san: moveResult.san,
-          from: move.from,
-          to: move.to,
-          piece: moveResult.piece,
-          color: moveResult.color,
-          captured: moveResult.captured,
-          promotion: moveResult.promotion,
-          flags: moveResult.flags,
-          fenBefore,
-          fenAfter: nextFen
+        // Record history
+        const record: MoveRecord = {
+          san: result.san,
+          from: result.from,
+          to: result.to,
+          piece: result.piece,
+          color: result.color,
+          captured: result.captured,
+          promotion: result.promotion,
+          flags: result.flags,
+          fenBefore: currentFen,
+          fenAfter: newFen
         };
-
-        const updatedHistory = [...history, newRecord];
-        const updatedFenHistory = [...gameFenHistory, nextFen];
-        setHistory(updatedHistory);
-        setGameFenHistory(updatedFenHistory);
+        setHistory((prev) => [...prev, record]);
 
         const isOver = checkGameOver();
+
+        // If game continues, immediately trigger the assistant's counter-move!
         if (!isOver) {
           setTimeout(() => {
             executeBotCounterMove(updatedFenHistory);
-          }, 180);
+          }, 150);
         }
 
         return true;
-      } catch {
+      } catch (err) {
+        console.error('Move validation error:', err);
         return false;
       }
     },
-    [chess, history, gameFenHistory, gameOverInfo.isOver, checkGameOver, executeBotCounterMove]
+    [chess, isBotTurn, gameFenHistory, checkGameOver, executeBotCounterMove]
   );
 
-  // God Mode direct FEN manipulation (500ms long press on board)
+  // God Mode direct board mutation
   const handleGodModeBoardChange = useCallback(
     (newFen: string) => {
       try {
         chess.load(newFen);
-        setLastMove(null);
+        setGameFenHistory((prev) => [...prev, newFen]);
         setBotArrow(null);
         setGhostPiece(null);
-        setGameFenHistory((prev) => [...prev, newFen]);
         checkGameOver();
-      } catch {}
+
+        // If it's the assistant's turn after manual board change, calculate best move
+        const isBotColor =
+          (playerColor === 'w' && chess.turn() === 'w') ||
+          (playerColor === 'b' && chess.turn() === 'b');
+        if (isBotColor && !chess.isGameOver()) {
+          setTimeout(() => {
+            executeBotCounterMove();
+          }, 200);
+        }
+      } catch (err) {
+        console.error('God Mode Board update error:', err);
+      }
     },
-    [chess, checkGameOver]
+    [chess, playerColor, checkGameOver, executeBotCounterMove]
   );
 
-  // =========================================================================
-  // MAIN MENU HANDLER
-  // =========================================================================
+  // Setup / Start Game Trigger
+  const handleStartGame = useCallback(
+    (config: {
+      personality: AIPersonality;
+      variant: PresetVariant;
+      playerColor: PlayerColor;
+      startingFen: string;
+    }) => {
+      stockfishService.reset();
+      chess.load(config.startingFen);
 
+      setPersonality(config.personality);
+      setActiveVariant(config.variant);
+      setPlayerColor(config.playerColor);
+      setIsFlipped(config.playerColor === 'b');
+
+      setHistory([]);
+      setGameFenHistory([config.startingFen]);
+      setLastMove(null);
+      setBotArrow(null);
+      setGhostPiece(null);
+      setGameOverInfo({ isOver: false, title: '', description: '', winner: null });
+      setIsSetupModalOpen(false);
+
+      // If user chose Black, bot moves first immediately
+      if (config.playerColor === 'b' && chess.turn() === 'w') {
+        setTimeout(() => {
+          executeBotCounterMove([config.startingFen]);
+        }, 300);
+      }
+    },
+    [chess, executeBotCounterMove]
+  );
+
+  // Open Main Menu: Stop engine, reset state, and reopen setup modal
   const handleOpenMainMenu = useCallback(() => {
+    stockfishService.reset();
     isBotThinkingRef.current = false;
     setIsBotTurn(false);
-    stockfishService.reset();
-
-    chess.reset();
-    setHistory([]);
-    setGameFenHistory([]);
-    setLastMove(null);
     setBotArrow(null);
     setGhostPiece(null);
     setGameOverInfo({ isOver: false, title: '', description: '', winner: null });
     setIsSetupModalOpen(true);
-  }, [chess]);
-
-  // Launch Game from Setup Modal
-  const handleStartGame = (config: {
-    personality: AIPersonality;
-    variant: PresetVariant;
-    playerColor: PlayerColor;
-    startingFen: string;
-  }) => {
-    setPersonality(config.personality);
-    setActiveVariant(config.variant);
-    setPlayerColor(config.playerColor);
-
-    const userIsBlack = config.playerColor === 'b';
-    setIsFlipped(userIsBlack);
-
-    stockfishService.reset();
-
-    const startingFen = config.startingFen || 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
-    try {
-      chess.load(startingFen);
-    } catch {
-      chess.reset();
-    }
-
-    setHistory([]);
-    setGameFenHistory([startingFen]);
-    setLastMove(null);
-    setBotArrow(null);
-    setGhostPiece(null);
-    setGameOverInfo({ isOver: false, title: '', description: '', winner: null });
-    setIsSetupModalOpen(false);
-
-    // If User chose White, bot plays White's opening move immediately
-    if (config.playerColor === 'w' && chess.turn() === 'w') {
-      setTimeout(() => {
-        executeBotCounterMove([startingFen]);
-      }, 350);
-    }
-  };
+  }, []);
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-amber-500 selection:text-slate-950">
+    <div className="relative min-h-screen bg-[#02040a] text-slate-100 flex flex-col justify-between overflow-x-hidden font-sans select-none">
+      {/* 1.5s Animated Splash Screen */}
+      {showSplash && <SplashScreen onComplete={() => setShowSplash(false)} />}
+
+      {/* Subtle Ambient Golden Particles Background */}
+      <div className="fixed inset-0 pointer-events-none overflow-hidden z-0">
+        <div className="absolute top-[-10%] left-[20%] w-[500px] h-[500px] rounded-full bg-amber-500/5 blur-[120px]" />
+        <div className="absolute bottom-[-10%] right-[15%] w-[450px] h-[450px] rounded-full bg-[#d4af37]/5 blur-[100px]" />
+      </div>
+
       {/* Sleek Minimalist Top Status Bar with Single Main Menu Button */}
       <Header
         personality={personality}
@@ -307,7 +329,7 @@ export default function App() {
       />
 
       {/* Main Focus Chess Arena */}
-      <main className="flex-1 flex flex-col items-center justify-center p-3 md:p-6 select-none">
+      <main className="flex-1 flex flex-col items-center justify-center p-3 md:p-6 select-none z-10">
         <div className="w-full max-w-[540px] flex flex-col items-center gap-3">
           {/* Interactive 64-Square Chessboard */}
           <ChessBoard
@@ -325,41 +347,41 @@ export default function App() {
           />
 
           {/* Minimal Status Hint Pill */}
-          <div className="w-full flex items-center justify-between px-3.5 py-2 rounded-xl bg-slate-900/70 border border-slate-800/80 text-xs text-slate-400 shadow-sm backdrop-blur-md">
+          <div className="w-full flex items-center justify-between px-4 py-2 rounded-2xl bg-[#0b101c]/80 border border-[#d4af37]/20 text-xs text-amber-100/70 shadow-md backdrop-blur-md">
             <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-emerald-400" />
+              <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
               <span>
-                Helping <strong className="text-amber-400">{playerColor === 'w' ? 'White' : 'Black'}</strong>. Input opponent's move.
+                Helping <strong className="text-[#d4af37]">{playerColor === 'w' ? 'White' : 'Black'}</strong>. Input opponent's move.
               </span>
             </div>
-            <div className="text-[11px] text-slate-400 hidden sm:block">
+            <div className="text-[11px] text-amber-200/50 hidden sm:block">
               Hold piece 500ms for God Mode
             </div>
           </div>
         </div>
       </main>
 
-      {/* Clean Glassmorphic Game Over Modal */}
+      {/* Luxury Obsidian Gold Game Over Modal */}
       {gameOverInfo.isOver && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md animate-fade-in">
-          <div className="bg-slate-900/90 border border-slate-700/80 p-6 md:p-8 rounded-3xl max-w-sm w-full text-center space-y-5 shadow-2xl">
-            <div className="w-16 h-16 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center mx-auto text-amber-400">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xl animate-fade-in">
+          <div className="bg-[#060913]/95 border border-[#d4af37]/50 p-6 md:p-8 rounded-3xl max-w-sm w-full text-center space-y-5 shadow-[0_0_50px_rgba(212,175,55,0.25)]">
+            <div className="w-16 h-16 rounded-2xl bg-amber-500/15 border border-[#d4af37]/40 flex items-center justify-center mx-auto text-[#d4af37] shadow-[0_0_20px_rgba(212,175,55,0.3)] animate-bounce">
               <Trophy className="w-8 h-8" />
             </div>
 
             <div>
-              <h2 className="text-xl md:text-2xl font-black text-slate-100 uppercase tracking-wide">
+              <h2 className="text-xl md:text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-[#d4af37] to-yellow-500 uppercase tracking-wide font-serif">
                 {gameOverInfo.title}
               </h2>
-              <p className="text-xs md:text-sm text-slate-400 mt-1.5">
+              <p className="text-xs md:text-sm text-slate-300 mt-1.5 leading-relaxed">
                 {gameOverInfo.description}
               </p>
             </div>
 
-            <div className="flex flex-col gap-2 pt-2">
+            <div className="flex flex-col gap-2.5 pt-2">
               <button
                 onClick={handleOpenMainMenu}
-                className="w-full py-3 px-4 bg-amber-500 hover:bg-amber-400 active:scale-[0.99] text-slate-950 font-black text-xs uppercase tracking-wider rounded-xl shadow-lg transition flex items-center justify-center gap-2 cursor-pointer"
+                className="w-full py-3 px-4 bg-gradient-to-r from-amber-500 to-[#d4af37] hover:brightness-110 active:scale-[0.98] text-slate-950 font-black text-xs uppercase tracking-wider rounded-xl shadow-lg transition flex items-center justify-center gap-2 cursor-pointer font-serif"
               >
                 <RefreshCw className="w-4 h-4" />
                 Play Again
@@ -367,7 +389,7 @@ export default function App() {
 
               <button
                 onClick={() => setGameOverInfo((prev) => ({ ...prev, isOver: false }))}
-                className="w-full py-2 px-4 bg-slate-800/80 hover:bg-slate-800 text-slate-300 text-xs font-semibold rounded-xl border border-slate-700/60 transition cursor-pointer"
+                className="w-full py-2.5 px-4 bg-slate-900/90 hover:bg-slate-800 text-slate-300 text-xs font-semibold rounded-xl border border-slate-700/60 transition cursor-pointer active:scale-98"
               >
                 Review Board
               </button>

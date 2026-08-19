@@ -1,11 +1,12 @@
 export type AIPersonalityId = 
+  | 'lion_mode'
+  | 'god_mode'
   | 'human_play'
   | 'human_pro'
   | 'tournament_player'
   | 'extreme_fast'
   | 'extreme_slow'
-  | 'hacker_extreme'
-  | 'god_mode';
+  | 'hacker_extreme';
 
 export interface AIPersonality {
   id: AIPersonalityId;
@@ -15,10 +16,11 @@ export interface AIPersonality {
   color: string;
   borderColor: string;
   badgeBg: string;
+  glowColor?: string;
   skillLevel: number; // 0-20
   depth: number;
   moveTime?: number; // ms
-  contempt: number; // -100 to 100
+  contempt: number; // -100 to 200
   multiPv: number;
   hash: number;
   description: string;

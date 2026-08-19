@@ -3,6 +3,7 @@ import { Chess, Square, Move } from 'chess.js';
 import { ChessPieceSvg } from './ChessPieceSvg';
 import { TacticalArrows } from './TacticalArrows';
 import { playChessSound } from '../utils/audio';
+import confetti from 'canvas-confetti';
 
 interface ChessBoardProps {
   chess: Chess;
@@ -84,128 +85,137 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
       }
       setInCheckSquare(foundKingSquare);
     } else {
-      // Instantly remove check warning when King is safe
       setInCheckSquare(null);
     }
   }, [chess, chess.fen()]);
 
-  const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
-  const ranks = ['8', '7', '6', '5', '4', '3', '2', '1'];
-
-  const displayFiles = isFlipped ? [...files].reverse() : files;
-  const displayRanks = isFlipped ? [...ranks].reverse() : ranks;
-
-  const getSquareFromCoords = useCallback((clientX: number, clientY: number): Square | null => {
-    if (!boardRef.current) return null;
-    const rect = boardRef.current.getBoundingClientRect();
-    if (
-      clientX < rect.left ||
-      clientX > rect.right ||
-      clientY < rect.top ||
-      clientY > rect.bottom
-    ) {
-      return null;
-    }
-    const squareSize = rect.width / 8;
-    const colIndex = Math.floor((clientX - rect.left) / squareSize);
-    const rowIndex = Math.floor((clientY - rect.top) / squareSize);
-
-    if (colIndex >= 0 && colIndex < 8 && rowIndex >= 0 && rowIndex < 8) {
-      const file = displayFiles[colIndex];
-      const rank = displayRanks[rowIndex];
-      return `${file}${rank}` as Square;
-    }
-    return null;
-  }, [displayFiles, displayRanks]);
-
-  const getMovesForSquare = useCallback((sq: Square) => {
+  // Capture particle burst
+  const triggerCaptureSparkle = (clientX: number, clientY: number) => {
     try {
-      return chess.moves({ square: sq, verbose: true }) as Move[];
-    } catch {
-      return [];
-    }
-  }, [chess]);
-
-  const attemptMove = (from: Square, to: Square): boolean => {
-    const move = chess.moves({ square: from, verbose: true }).find((m) => m.to === to);
-    if (!move) return false;
-
-    const isPromotion =
-      move.piece === 'p' &&
-      ((move.color === 'w' && to[1] === '8') || (move.color === 'b' && to[1] === '1'));
-
-    if (isPromotion) {
-      setPendingPromotion({ from, to });
-      return true;
-    }
-
-    const success = onOpponentMove({ from, to });
-    if (success) {
-      setSelectedSquare(null);
-      setLegalMoves([]);
-    }
-    return success;
+      const x = clientX / window.innerWidth;
+      const y = clientY / window.innerHeight;
+      confetti({
+        particleCount: 12,
+        spread: 35,
+        startVelocity: 15,
+        origin: { x, y },
+        colors: ['#d4af37', '#f59e0b', '#fbbf24', '#ffffff'],
+        disableForReducedMotion: true,
+        ticks: 40
+      });
+    } catch {}
   };
 
-  const handlePromotionSelect = (promotionPiece: 'q' | 'r' | 'b' | 'n') => {
-    if (!pendingPromotion) return;
-    onOpponentMove({
-      from: pendingPromotion.from,
-      to: pendingPromotion.to,
-      promotion: promotionPiece
-    });
-    setPendingPromotion(null);
-    setSelectedSquare(null);
-    setLegalMoves([]);
+  const getSquareFromCoords = useCallback(
+    (clientX: number, clientY: number): Square | null => {
+      if (!boardRef.current) return null;
+      const rect = boardRef.current.getBoundingClientRect();
+      if (
+        clientX < rect.left ||
+        clientX > rect.right ||
+        clientY < rect.top ||
+        clientY > rect.bottom
+      ) {
+        return null;
+      }
+
+      const col = Math.floor(((clientX - rect.left) / rect.width) * 8);
+      const row = Math.floor(((clientY - rect.top) / rect.height) * 8);
+
+      if (col < 0 || col > 7 || row < 0 || row > 7) return null;
+
+      const fileIndex = isFlipped ? 7 - col : col;
+      const rankIndex = isFlipped ? row : 7 - row;
+
+      const file = String.fromCharCode(97 + fileIndex);
+      const rank = (rankIndex + 1).toString();
+
+      return `${file}${rank}` as Square;
+    },
+    [isFlipped]
+  );
+
+  const clearLongPressTimer = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
   };
 
-  // Event Delegation Handlers
+  const executeMove = useCallback(
+    (from: Square, to: Square, promotionPiece?: string) => {
+      const targetPiece = chess.get(to);
+      const isPawn = chess.get(from)?.type === 'p';
+      const isTargetRank = (chess.turn() === 'w' && to.endsWith('8')) || (chess.turn() === 'b' && to.endsWith('1'));
+
+      if (isPawn && isTargetRank && !promotionPiece) {
+        setPendingPromotion({ from, to });
+        return;
+      }
+
+      const isCapture = Boolean(targetPiece || (isPawn && from[0] !== to[0]));
+      const success = onOpponentMove({ from, to, promotion: promotionPiece || 'q' });
+
+      if (success) {
+        setSelectedSquare(null);
+        setLegalMoves([]);
+        if (isCapture && boardRef.current) {
+          const rect = boardRef.current.getBoundingClientRect();
+          triggerCaptureSparkle(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        }
+      }
+    },
+    [chess, onOpponentMove]
+  );
+
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (isBotTurn || isGameOver || pendingPromotion) return;
-    if (!e.isPrimary || (e.button !== 0 && e.pointerType === 'mouse')) return;
+    if (isBotTurn || isGameOver) return;
+    const square = getSquareFromCoords(e.clientX, e.clientY);
+    if (!square) return;
 
     activePointerIdRef.current = e.pointerId;
     pointerStartPosRef.current = { x: e.clientX, y: e.clientY };
-
-    const targetEl = (e.target as HTMLElement).closest('[data-square]');
-    const clickedSquare = targetEl ? (targetEl.getAttribute('data-square') as Square) : null;
-    if (!clickedSquare) return;
-
-    const piece = chess.get(clickedSquare);
-
-    if (selectedSquare && selectedSquare !== clickedSquare) {
-      const moved = attemptMove(selectedSquare, clickedSquare);
-      if (moved) return;
-    }
-
-    const currentMoves = piece && piece.color === chess.turn() ? getMovesForSquare(clickedSquare) : [];
-
-    setInteractionState({
-      isDragging: false,
-      isGodMode: false,
-      originSquare: clickedSquare,
-      dragPos: { x: e.clientX, y: e.clientY },
-      hoverSquare: clickedSquare,
-      isOffBoard: false,
-      draggedPiece: piece ? { type: piece.type, color: piece.color } : null
-    });
+    const piece = chess.get(square);
 
     if (piece) {
-      setSelectedSquare(clickedSquare);
-      setLegalMoves(currentMoves);
-
-      if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+      clearLongPressTimer();
       longPressTimerRef.current = setTimeout(() => {
-        if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
-        playChessSound('godmode');
         setIsGodModeUnlocked(true);
-
         setInteractionState((prev) => ({
           ...prev,
           isDragging: true,
-          isGodMode: true
+          isGodMode: true,
+          originSquare: square,
+          draggedPiece: { type: piece.type, color: piece.color },
+          dragPos: { x: e.clientX, y: e.clientY },
+          hoverSquare: square,
+          isOffBoard: false
         }));
+        playChessSound('capture');
       }, 500);
+    }
+
+    if (selectedSquare) {
+      const move = legalMoves.find((m) => m.to === square);
+      if (move) {
+        clearLongPressTimer();
+        executeMove(selectedSquare, square);
+        return;
+      }
+    }
+
+    if (piece && piece.color === chess.turn()) {
+      setSelectedSquare(square);
+      setLegalMoves(chess.moves({ square, verbose: true }));
+      setInteractionState((prev) => ({
+        ...prev,
+        isDragging: true,
+        originSquare: square,
+        draggedPiece: { type: piece.type, color: piece.color },
+        dragPos: { x: e.clientX, y: e.clientY },
+        hoverSquare: square,
+        isOffBoard: false
+      }));
     } else {
       setSelectedSquare(null);
       setLegalMoves([]);
@@ -215,111 +225,64 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (activePointerIdRef.current !== e.pointerId) return;
 
-    const startPos = pointerStartPosRef.current;
-    if (!startPos) return;
-
-    const dist = Math.hypot(e.clientX - startPos.x, e.clientY - startPos.y);
-
-    if (dist > 8 && longPressTimerRef.current && !interactionRef.current.isGodMode) {
-      clearTimeout(longPressTimerRef.current);
-      longPressTimerRef.current = null;
-
-      if (interactionRef.current.originSquare && interactionRef.current.draggedPiece) {
-        setInteractionState((prev) => ({
-          ...prev,
-          isDragging: true,
-          isGodMode: false
-        }));
+    if (pointerStartPosRef.current && !interactionRef.current.isGodMode) {
+      const dist = Math.hypot(
+        e.clientX - pointerStartPosRef.current.x,
+        e.clientY - pointerStartPosRef.current.y
+      );
+      if (dist > 15) {
+        clearLongPressTimer();
       }
     }
 
-    if (interactionRef.current.isDragging) {
-      const hoverSq = getSquareFromCoords(e.clientX, e.clientY);
-      setInteractionState((prev) => ({
-        ...prev,
-        dragPos: { x: e.clientX, y: e.clientY },
-        hoverSquare: hoverSq,
-        isOffBoard: hoverSq === null
-      }));
-    }
-  };
+    if (!interactionRef.current.isDragging) return;
 
-  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (activePointerIdRef.current !== e.pointerId) return;
-    activePointerIdRef.current = null;
-
-    if (longPressTimerRef.current) {
-      clearTimeout(longPressTimerRef.current);
-      longPressTimerRef.current = null;
-    }
-
-    const state = interactionRef.current;
-    pointerStartPosRef.current = null;
-
-    const dropSquare = getSquareFromCoords(e.clientX, e.clientY);
-
-    // God Mode Drop
-    if (state.isGodMode && state.draggedPiece) {
-      try {
-        if (state.originSquare) {
-          chess.remove(state.originSquare);
-        }
-
-        if (dropSquare) {
-          chess.remove(dropSquare);
-          chess.put(
-            { type: state.draggedPiece.type as any, color: state.draggedPiece.color },
-            dropSquare
-          );
-          playChessSound('move');
-        } else {
-          playChessSound('delete');
-        }
-
-        const nextFen = chess.fen();
-        onGodModeBoardChange(nextFen);
-      } catch (err) {
-        console.warn('God Mode drop notice:', err);
-      }
-
-      setInteractionState({
-        isDragging: false,
-        isGodMode: false,
-        originSquare: null,
-        dragPos: null,
-        hoverSquare: null,
-        isOffBoard: false,
-        draggedPiece: null
-      });
-      setSelectedSquare(null);
-      setLegalMoves([]);
-      return;
-    }
-
-    // Normal Legal Drag Drop
-    if (state.isDragging && state.originSquare && dropSquare) {
-      if (state.originSquare !== dropSquare) {
-        attemptMove(state.originSquare, dropSquare);
-      }
-    }
+    const currentSquare = getSquareFromCoords(e.clientX, e.clientY);
+    const isOffBoard = currentSquare === null;
 
     setInteractionState((prev) => ({
       ...prev,
-      isDragging: false,
-      isGodMode: false,
-      dragPos: null,
-      hoverSquare: null,
-      isOffBoard: false
+      dragPos: { x: e.clientX, y: e.clientY },
+      hoverSquare: currentSquare,
+      isOffBoard
     }));
   };
 
-  const handlePointerCancel = () => {
-    if (longPressTimerRef.current) {
-      clearTimeout(longPressTimerRef.current);
-      longPressTimerRef.current = null;
-    }
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    clearLongPressTimer();
+    if (activePointerIdRef.current !== e.pointerId) return;
     activePointerIdRef.current = null;
     pointerStartPosRef.current = null;
+
+    const state = interactionRef.current;
+    if (!state.isDragging) return;
+
+    const targetSquare = getSquareFromCoords(e.clientX, e.clientY);
+
+    if (state.isGodMode) {
+      if (state.originSquare) {
+        if (!targetSquare) {
+          const simChess = new Chess(chess.fen());
+          simChess.remove(state.originSquare);
+          onGodModeBoardChange(simChess.fen());
+          playChessSound('capture');
+        } else if (targetSquare !== state.originSquare && state.draggedPiece) {
+          const simChess = new Chess(chess.fen());
+          simChess.remove(state.originSquare);
+          simChess.put(
+            { type: state.draggedPiece.type as any, color: state.draggedPiece.color },
+            targetSquare
+          );
+          onGodModeBoardChange(simChess.fen());
+          playChessSound('move');
+        }
+      }
+    } else if (state.originSquare && targetSquare && targetSquare !== state.originSquare) {
+      const move = legalMoves.find((m) => m.to === targetSquare);
+      if (move) {
+        executeMove(state.originSquare, targetSquare);
+      }
+    }
 
     setInteractionState({
       isDragging: false,
@@ -332,30 +295,47 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
     });
   };
 
-  return (
-    <div className="relative flex flex-col items-center select-none w-full max-w-[540px] aspect-square">
-      {/* Bot Thinking Floating Pill */}
-      {isBotTurn && (
-        <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-slate-900/90 text-amber-400 border border-amber-500/40 text-[11px] font-bold px-3 py-0.5 rounded-full shadow-lg flex items-center gap-1.5 z-30">
-          <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-          Bot Calculating...
-        </div>
-      )}
+  const handlePointerCancel = () => {
+    clearLongPressTimer();
+    setInteractionState({
+      isDragging: false,
+      isGodMode: false,
+      originSquare: null,
+      dragPos: null,
+      hoverSquare: null,
+      isOffBoard: false,
+      draggedPiece: null
+    });
+  };
 
-      {/* Main 64-Square Grid */}
+  const handlePromotionSelect = (piece: string) => {
+    if (!pendingPromotion) return;
+    executeMove(pendingPromotion.from, pendingPromotion.to, piece);
+    setPendingPromotion(null);
+  };
+
+  const displayFiles = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+  const displayRanks = ['8', '7', '6', '5', '4', '3', '2', '1'];
+
+  if (isFlipped) {
+    displayFiles.reverse();
+    displayRanks.reverse();
+  }
+
+  return (
+    <div className="relative w-full max-w-[480px] aspect-square mx-auto select-none touch-none p-1">
+      {/* Board Container with Luxury Obsidian Gold Border & Glow */}
       <div
-        id="board"
         ref={boardRef}
-        onContextMenu={(e) => e.preventDefault()}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerCancel}
         style={{
           touchAction: 'none',
-          filter: isGameOver ? 'brightness(0.45)' : undefined
+          filter: isGameOver ? 'brightness(0.4)' : undefined
         }}
-        className={`relative w-full h-full grid grid-cols-8 grid-rows-8 rounded-2xl overflow-hidden shadow-2xl border-2 border-slate-700/80 bg-slate-900 transition-all duration-300 ${
+        className={`relative w-full h-full grid grid-cols-8 grid-rows-8 rounded-2xl overflow-hidden shadow-[0_12px_40px_rgba(0,0,0,0.85)] border-2 border-[#d4af37]/35 bg-[#050814] transition-all duration-300 ${
           isBotTurn || isGameOver ? 'pointer-events-none cursor-wait' : ''
         }`}
       >
@@ -380,15 +360,16 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
               interactionState.isDragging &&
               interactionState.originSquare === square;
 
-            let squareBg = isLightSquare ? 'bg-[#ECECD0]' : 'bg-[#739552]';
+            // Luxury Walnut & Warm Cream Square Palette
+            let squareBg = isLightSquare ? 'bg-[#f0e6cc]' : 'bg-[#4a3319]';
             if (isLastMoveFrom || isLastMoveTo) {
-              squareBg = isLightSquare ? 'bg-[#F5F682]' : 'bg-[#B9CA43]';
+              squareBg = isLightSquare ? 'bg-[#e8d89e]' : 'bg-[#7a572a]';
             }
             if (isSelected) {
-              squareBg = 'bg-amber-300/80';
+              squareBg = 'bg-[#d4af37]/80';
             }
             if (isGodHovered) {
-              squareBg = 'bg-amber-400/90 ring-2 ring-amber-500 ring-inset';
+              squareBg = 'bg-[#f59e0b]/90 ring-2 ring-[#d4af37] ring-inset';
             }
 
             return (
@@ -397,7 +378,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                 id={`square-${square}`}
                 data-square={square}
                 style={{ position: 'relative' }}
-                className={`w-full h-full flex items-center justify-center transition-colors duration-150 ${squareBg} ${
+                className={`w-full h-full flex items-center justify-center transition-colors duration-200 ${squareBg} ${
                   isKingInCheck ? 'king-in-check' : ''
                 }`}
               >
@@ -405,7 +386,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                 {colIndex === 0 && (
                   <span
                     className={`absolute top-0.5 left-1 text-[9px] md:text-[11px] font-bold select-none z-10 pointer-events-none ${
-                      isLightSquare ? 'text-[#739552]' : 'text-[#ECECD0]'
+                      isLightSquare ? 'text-[#4a3319]/80' : 'text-[#f0e6cc]/80'
                     }`}
                   >
                     {rank}
@@ -414,7 +395,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                 {rowIndex === 7 && (
                   <span
                     className={`absolute bottom-0.5 right-1 text-[9px] md:text-[11px] font-bold select-none z-10 pointer-events-none ${
-                      isLightSquare ? 'text-[#739552]' : 'text-[#ECECD0]'
+                      isLightSquare ? 'text-[#4a3319]/80' : 'text-[#f0e6cc]/80'
                     }`}
                   >
                     {file}
@@ -423,7 +404,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
 
                 {/* Legal Move Dot */}
                 {isLegalDest && !isCapture && (
-                  <div className="w-3.5 h-3.5 md:w-4 md:h-4 rounded-full bg-slate-900/30 backdrop-blur-xs z-15 pointer-events-none" />
+                  <div className="w-3.5 h-3.5 md:w-4 md:h-4 rounded-full bg-slate-900/35 backdrop-blur-xs z-15 pointer-events-none" />
                 )}
 
                 {/* Legal Move Capture Ring */}
@@ -450,7 +431,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                   </div>
                 )}
 
-                {/* Real Piece SVG */}
+                {/* Real Piece SVG with Soft Drop Shadow & 250ms Smooth Motion */}
                 {piece && !isCurrentlyDragged && (
                   <div
                     style={{
@@ -461,7 +442,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                       height: '100%',
                       pointerEvents: 'none'
                     }}
-                    className="p-1 flex items-center justify-center select-none z-20"
+                    className="p-1 flex items-center justify-center select-none z-20 chess-piece"
                   >
                     <ChessPieceSvg type={piece.type} color={piece.color} />
                   </div>
@@ -511,9 +492,9 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
 
       {/* Pawn Promotion Dialog */}
       {pendingPromotion && (
-        <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-md rounded-2xl z-40 flex flex-col items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 p-4 rounded-xl shadow-2xl flex flex-col items-center gap-3">
-            <span className="text-sm font-bold text-amber-400 uppercase tracking-wider">
+        <div className="absolute inset-0 bg-slate-950/85 backdrop-blur-md rounded-2xl z-40 flex flex-col items-center justify-center p-4">
+          <div className="bg-[#0b101c] border border-[#d4af37]/40 p-4 rounded-xl shadow-2xl flex flex-col items-center gap-3">
+            <span className="text-sm font-bold text-[#d4af37] uppercase tracking-wider font-serif">
               Choose Promotion Piece
             </span>
             <div className="flex gap-2">
@@ -521,7 +502,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                 <button
                   key={pieceType}
                   onClick={() => handlePromotionSelect(pieceType)}
-                  className="w-12 h-12 md:w-14 md:h-14 bg-slate-800 hover:bg-slate-700 active:scale-95 rounded-lg border border-slate-600 flex items-center justify-center p-1.5 transition-all shadow-md hover:border-amber-400 cursor-pointer"
+                  className="w-12 h-12 md:w-14 md:h-14 bg-slate-900 hover:bg-slate-800 active:scale-95 rounded-lg border border-slate-700 flex items-center justify-center p-1.5 transition-all shadow-md hover:border-[#d4af37] cursor-pointer"
                 >
                   <ChessPieceSvg type={pieceType} color={chess.turn()} />
                 </button>
