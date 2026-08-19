@@ -64,7 +64,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   const pointerStartPosRef = useRef<{ x: number; y: number } | null>(null);
   const activePointerIdRef = useRef<number | null>(null);
 
-  // Exact Visual King in Check Detection & Removal Logic
+  // Check detection
   useEffect(() => {
     if (chess.inCheck()) {
       const activeSide = chess.turn();
@@ -95,7 +95,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
       const x = clientX / window.innerWidth;
       const y = clientY / window.innerHeight;
       confetti({
-        particleCount: 12,
+        particleCount: 14,
         spread: 35,
         startVelocity: 15,
         origin: { x, y },
@@ -144,9 +144,10 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
 
   const executeMove = useCallback(
     (from: Square, to: Square, promotionPiece?: string) => {
+      const piece = chess.get(from);
       const targetPiece = chess.get(to);
-      const isPawn = chess.get(from)?.type === 'p';
-      const isTargetRank = (chess.turn() === 'w' && to.endsWith('8')) || (chess.turn() === 'b' && to.endsWith('1'));
+      const isPawn = piece?.type === 'p';
+      const isTargetRank = (piece?.color === 'w' && to[1] === '8') || (piece?.color === 'b' && to[1] === '1');
 
       if (isPawn && isTargetRank && !promotionPiece) {
         setPendingPromotion({ from, to });
@@ -238,49 +239,64 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
     if (!interactionRef.current.isDragging) return;
 
     const currentSquare = getSquareFromCoords(e.clientX, e.clientY);
-    const isOffBoard = currentSquare === null;
-
     setInteractionState((prev) => ({
       ...prev,
       dragPos: { x: e.clientX, y: e.clientY },
       hoverSquare: currentSquare,
-      isOffBoard
+      isOffBoard: !currentSquare
     }));
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    clearLongPressTimer();
     if (activePointerIdRef.current !== e.pointerId) return;
+    clearLongPressTimer();
     activePointerIdRef.current = null;
     pointerStartPosRef.current = null;
 
-    const state = interactionRef.current;
-    if (!state.isDragging) return;
+    const currentInteraction = interactionRef.current;
+    if (!currentInteraction.isDragging) return;
 
-    const targetSquare = getSquareFromCoords(e.clientX, e.clientY);
+    const destSquare = getSquareFromCoords(e.clientX, e.clientY);
 
-    if (state.isGodMode) {
-      if (state.originSquare) {
-        if (!targetSquare) {
-          const simChess = new Chess(chess.fen());
-          simChess.remove(state.originSquare);
-          onGodModeBoardChange(simChess.fen());
-          playChessSound('capture');
-        } else if (targetSquare !== state.originSquare && state.draggedPiece) {
-          const simChess = new Chess(chess.fen());
-          simChess.remove(state.originSquare);
-          simChess.put(
-            { type: state.draggedPiece.type as any, color: state.draggedPiece.color },
-            targetSquare
-          );
-          onGodModeBoardChange(simChess.fen());
+    // God Mode Mutation
+    if (currentInteraction.isGodMode && currentInteraction.originSquare) {
+      if (currentInteraction.isOffBoard || !destSquare) {
+        chess.remove(currentInteraction.originSquare);
+        playChessSound('capture');
+        onGodModeBoardChange(chess.fen());
+      } else if (destSquare !== currentInteraction.originSquare) {
+        const piece = chess.remove(currentInteraction.originSquare);
+        if (piece) {
+          chess.put(piece, destSquare);
           playChessSound('move');
+          onGodModeBoardChange(chess.fen());
         }
       }
-    } else if (state.originSquare && targetSquare && targetSquare !== state.originSquare) {
-      const move = legalMoves.find((m) => m.to === targetSquare);
-      if (move) {
-        executeMove(state.originSquare, targetSquare);
+      setInteractionState({
+        isDragging: false,
+        isGodMode: false,
+        originSquare: null,
+        dragPos: null,
+        hoverSquare: null,
+        isOffBoard: false,
+        draggedPiece: null
+      });
+      setSelectedSquare(null);
+      setLegalMoves([]);
+      return;
+    }
+
+    // Standard Opponent Move
+    if (
+      currentInteraction.originSquare &&
+      destSquare &&
+      currentInteraction.originSquare !== destSquare
+    ) {
+      const isLegal = legalMoves.some((m) => m.to === destSquare);
+      if (isLegal) {
+        executeMove(currentInteraction.originSquare, destSquare);
+      } else {
+        playChessSound('illegal');
       }
     }
 
@@ -297,6 +313,8 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
 
   const handlePointerCancel = () => {
     clearLongPressTimer();
+    activePointerIdRef.current = null;
+    pointerStartPosRef.current = null;
     setInteractionState({
       isDragging: false,
       isGodMode: false,
@@ -317,10 +335,8 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   const displayFiles = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
   const displayRanks = ['8', '7', '6', '5', '4', '3', '2', '1'];
 
-  if (isFlipped) {
-    displayFiles.reverse();
-    displayRanks.reverse();
-  }
+  const renderedFiles = isFlipped ? [...displayFiles].reverse() : displayFiles;
+  const renderedRanks = isFlipped ? [...displayRanks].reverse() : displayRanks;
 
   return (
     <div className="relative w-full max-w-[480px] aspect-square mx-auto select-none touch-none p-1">
@@ -339,8 +355,8 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
           isBotTurn || isGameOver ? 'pointer-events-none cursor-wait' : ''
         }`}
       >
-        {displayRanks.map((rank, rowIndex) =>
-          displayFiles.map((file, colIndex) => {
+        {renderedRanks.map((rank, rowIndex) =>
+          renderedFiles.map((file, colIndex) => {
             const square = `${file}${rank}` as Square;
             const isLightSquare = (file.charCodeAt(0) - 97 + parseInt(rank, 10)) % 2 !== 0;
             const piece = chess.get(square);
@@ -360,7 +376,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
               interactionState.isDragging &&
               interactionState.originSquare === square;
 
-            // Luxury Walnut & Warm Cream Square Palette
+            // Walnut & Warm Cream Board Palette
             let squareBg = isLightSquare ? 'bg-[#f0e6cc]' : 'bg-[#4a3319]';
             if (isLastMoveFrom || isLastMoveTo) {
               squareBg = isLightSquare ? 'bg-[#e8d89e]' : 'bg-[#7a572a]';
@@ -378,15 +394,42 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                 id={`square-${square}`}
                 data-square={square}
                 style={{ position: 'relative' }}
-                className={`w-full h-full flex items-center justify-center transition-colors duration-200 ${squareBg} ${
-                  isKingInCheck ? 'king-in-check' : ''
-                }`}
+                className={`relative w-full h-full flex items-center justify-center transition-colors duration-150 ${squareBg}`}
               >
-                {/* Board Rank & File Labels */}
+                {/* King in Check Red Glow Indicator */}
+                {isKingInCheck && (
+                  <div className="absolute inset-0 bg-red-600/60 rounded-full animate-ping pointer-events-none" />
+                )}
+
+                {/* Ghost Piece on Bot's Origin Square */}
+                {isGhostSquare && !piece && (
+                  <div className="absolute inset-0 p-1 opacity-35 pointer-events-none animate-pulse">
+                    <ChessPieceSvg type={ghostPiece.type} color={ghostPiece.color} />
+                  </div>
+                )}
+
+                {/* Normal Board Piece */}
+                {piece && !isCurrentlyDragged && (
+                  <div className="w-full h-full p-1 transition-transform duration-100 ease-out hover:scale-105 pointer-events-none">
+                    <ChessPieceSvg type={piece.type} color={piece.color} />
+                  </div>
+                )}
+
+                {/* Legal Move Dot indicator */}
+                {isLegalDest && !isCapture && (
+                  <div className="w-3.5 h-3.5 rounded-full bg-black/30 pointer-events-none" />
+                )}
+
+                {/* Legal Move Capture Ring */}
+                {isLegalDest && isCapture && (
+                  <div className="absolute inset-1 rounded-full border-4 border-black/35 pointer-events-none animate-pulse" />
+                )}
+
+                {/* Rank & File Corner Labels */}
                 {colIndex === 0 && (
                   <span
-                    className={`absolute top-0.5 left-1 text-[9px] md:text-[11px] font-bold select-none z-10 pointer-events-none ${
-                      isLightSquare ? 'text-[#4a3319]/80' : 'text-[#f0e6cc]/80'
+                    className={`absolute top-0.5 left-1 text-[9px] font-bold select-none pointer-events-none ${
+                      isLightSquare ? 'text-[#4a3319]/70' : 'text-[#f0e6cc]/70'
                     }`}
                   >
                     {rank}
@@ -394,117 +437,57 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                 )}
                 {rowIndex === 7 && (
                   <span
-                    className={`absolute bottom-0.5 right-1 text-[9px] md:text-[11px] font-bold select-none z-10 pointer-events-none ${
-                      isLightSquare ? 'text-[#4a3319]/80' : 'text-[#f0e6cc]/80'
+                    className={`absolute bottom-0.5 right-1 text-[9px] font-bold select-none pointer-events-none ${
+                      isLightSquare ? 'text-[#4a3319]/70' : 'text-[#f0e6cc]/70'
                     }`}
                   >
                     {file}
                   </span>
-                )}
-
-                {/* Legal Move Dot */}
-                {isLegalDest && !isCapture && (
-                  <div className="w-3.5 h-3.5 md:w-4 md:h-4 rounded-full bg-slate-900/35 backdrop-blur-xs z-15 pointer-events-none" />
-                )}
-
-                {/* Legal Move Capture Ring */}
-                {isLegalDest && isCapture && (
-                  <div className="absolute inset-1 rounded-full border-4 border-slate-900/40 z-15 pointer-events-none" />
-                )}
-
-                {/* Ghost Piece on Bot Origin Square */}
-                {isGhostSquare && (
-                  <div
-                    style={{
-                      position: 'absolute',
-                      top: 0,
-                      left: 0,
-                      width: '100%',
-                      height: '100%',
-                      pointerEvents: 'none'
-                    }}
-                    className="p-1 opacity-40 z-10 scale-95"
-                  >
-                    <div className="w-full h-full rounded-md ring-2 ring-red-500/50 ring-dashed">
-                      <ChessPieceSvg type={ghostPiece.type} color={ghostPiece.color} />
-                    </div>
-                  </div>
-                )}
-
-                {/* Real Piece SVG with Soft Drop Shadow & 250ms Smooth Motion */}
-                {piece && !isCurrentlyDragged && (
-                  <div
-                    style={{
-                      position: 'absolute',
-                      top: 0,
-                      left: 0,
-                      width: '100%',
-                      height: '100%',
-                      pointerEvents: 'none'
-                    }}
-                    className="p-1 flex items-center justify-center select-none z-20 chess-piece"
-                  >
-                    <ChessPieceSvg type={piece.type} color={piece.color} />
-                  </div>
                 )}
               </div>
             );
           })
         )}
 
-        {/* Vector Arrow Overlay */}
-        <TacticalArrows
-          arrow={botArrow}
-          boardRef={boardRef}
-        />
+        {/* Tactical Arrow Overlay */}
+        <TacticalArrows arrow={botArrow} boardRef={boardRef} />
       </div>
 
-      {/* Floating Piece Cursor during Drag & God Mode */}
-      {interactionState.isDragging && interactionState.draggedPiece && interactionState.dragPos && (
-        <div
-          className="fixed pointer-events-none z-50 transform -translate-x-1/2 -translate-y-1/2"
-          style={{
-            left: `${interactionState.dragPos.x}px`,
-            top: `${interactionState.dragPos.y}px`,
-            width: '60px',
-            height: '60px'
-          }}
-        >
+      {/* Floating Dragged Piece */}
+      {interactionState.isDragging &&
+        interactionState.draggedPiece &&
+        interactionState.dragPos && (
           <div
-            className={`w-full h-full filter brightness-110 ${
-              interactionState.isGodMode
-                ? 'scale-125 drop-shadow-[0_15px_25px_rgba(0,0,0,0.7)]'
-                : 'scale-110 drop-shadow-[0_8px_16px_rgba(0,0,0,0.5)]'
-            }`}
+            className="fixed pointer-events-none z-50 transform -translate-x-1/2 -translate-y-1/2 scale-125 transition-transform duration-75 drop-shadow-[0_15px_25px_rgba(0,0,0,0.6)]"
+            style={{
+              left: `${interactionState.dragPos.x}px`,
+              top: `${interactionState.dragPos.y}px`,
+              width: '56px',
+              height: '56px'
+            }}
           >
             <ChessPieceSvg
               type={interactionState.draggedPiece.type}
               color={interactionState.draggedPiece.color}
             />
           </div>
-          {interactionState.isGodMode && interactionState.isOffBoard && (
-            <div className="absolute -bottom-4 left-1/2 -translate-x-1/2 bg-rose-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow whitespace-nowrap">
-              Release to Delete
-            </div>
-          )}
-        </div>
-      )}
+        )}
 
-      {/* Pawn Promotion Dialog */}
+      {/* Pawn Promotion Modal */}
       {pendingPromotion && (
-        <div className="absolute inset-0 bg-slate-950/85 backdrop-blur-md rounded-2xl z-40 flex flex-col items-center justify-center p-4">
-          <div className="bg-[#0b101c] border border-[#d4af37]/40 p-4 rounded-xl shadow-2xl flex flex-col items-center gap-3">
-            <span className="text-sm font-bold text-[#d4af37] uppercase tracking-wider font-serif">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-fade-in">
+          <div className="bg-[#0b101c] border border-[#d4af37]/60 p-5 rounded-2xl shadow-2xl flex flex-col items-center gap-4">
+            <h3 className="text-sm font-bold text-amber-200 uppercase tracking-wider font-serif">
               Choose Promotion Piece
-            </span>
-            <div className="flex gap-2">
-              {(['q', 'n', 'r', 'b'] as const).map((pieceType) => (
+            </h3>
+            <div className="flex gap-3">
+              {['q', 'r', 'b', 'n'].map((p) => (
                 <button
-                  key={pieceType}
-                  onClick={() => handlePromotionSelect(pieceType)}
-                  className="w-12 h-12 md:w-14 md:h-14 bg-slate-900 hover:bg-slate-800 active:scale-95 rounded-lg border border-slate-700 flex items-center justify-center p-1.5 transition-all shadow-md hover:border-[#d4af37] cursor-pointer"
+                  key={p}
+                  onClick={() => handlePromotionSelect(p)}
+                  className="w-14 h-14 p-2 rounded-xl bg-slate-800/90 border border-slate-700 hover:border-[#d4af37] hover:bg-slate-700 transition flex items-center justify-center cursor-pointer active:scale-95 shadow-md"
                 >
-                  <ChessPieceSvg type={pieceType} color={chess.turn()} />
+                  <ChessPieceSvg type={p} color={chess.turn() === 'w' ? 'b' : 'w'} />
                 </button>
               ))}
             </div>

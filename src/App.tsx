@@ -1,9 +1,9 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Chess, Square } from 'chess.js';
 import confetti from 'canvas-confetti';
 import { Trophy, RefreshCw } from 'lucide-react';
 
-import { AI_PERSONALITIES, PRESET_VARIANTS } from './constants/chessData';
+import { LION_MODE, PRESET_VARIANTS } from './constants/chessData';
 import { AIPersonality, MoveRecord, PlayerColor, PresetVariant } from './types/chess';
 import { stockfishService } from './services/stockfishEngine';
 import { playChessSound } from './utils/audio';
@@ -19,24 +19,27 @@ export default function App() {
 
   // Core Chess State
   const [chess] = useState(() => new Chess());
+  const [fen, setFen] = useState<string>(chess.fen());
   const [history, setHistory] = useState<MoveRecord[]>([]);
-  const [gameFenHistory, setGameFenHistory] = useState<string[]>([]);
+  const [gameFenHistory, setGameFenHistory] = useState<string[]>([chess.fen()]);
+  const gameFenHistoryRef = useRef<string[]>([chess.fen()]);
   const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(null);
 
-  // Bot Visual Indicators
+  // Visual Move Indicators
   const [botArrow, setBotArrow] = useState<{ from: string; to: string } | null>(null);
   const [ghostPiece, setGhostPiece] = useState<{ square: string; type: string; color: 'w' | 'b' } | null>(null);
 
   // Configuration
-  const [personality, setPersonality] = useState<AIPersonality>(AI_PERSONALITIES.lion_mode);
-  const [activeVariant, setActiveVariant] = useState<PresetVariant>(PRESET_VARIANTS[0]);
-  const [playerColor, setPlayerColor] = useState<PlayerColor>('w');
+  const [personality] = useState<AIPersonality>(LION_MODE);
+  const [userColor, setUserColor] = useState<PlayerColor>('w'); // The color LION plays for
   const [isFlipped, setIsFlipped] = useState<boolean>(false);
   const [isSetupModalOpen, setIsSetupModalOpen] = useState<boolean>(true);
 
-  // Bot State
-  const [isBotTurn, setIsBotTurn] = useState<boolean>(false);
+  // Engine Calculation & Lock States
+  const [isBotThinking, setIsBotThinking] = useState<boolean>(false);
   const isBotThinkingRef = useRef<boolean>(false);
+  const [isBoardLocked, setIsBoardLocked] = useState<boolean>(false);
+  const [statusText, setStatusText] = useState<string>('');
 
   // God Mode State
   const [isGodModeUnlocked, setIsGodModeUnlocked] = useState<boolean>(false);
@@ -85,42 +88,41 @@ export default function App() {
   }, [chess]);
 
   // =========================================================================
-  // BOT COUNTER-MOVE EXECUTION (WITH FEN BLACKLIST FILTER)
+  // 🦁 LION AUTOMATIC MOVE EXECUTION (PLAYS ONLY FOR targetColor)
   // =========================================================================
 
-  const executeBotCounterMove = useCallback(
-    (currentFenHistory?: string[]) => {
+  const executeBotMoveFor = useCallback(
+    (targetColor: PlayerColor) => {
       if (chess.isGameOver() || isBotThinkingRef.current) return;
+      const turn = chess.turn();
+      if (targetColor !== 'both' && turn !== targetColor) return;
 
       isBotThinkingRef.current = true;
-      setIsBotTurn(true);
+      setIsBotThinking(true);
 
       const currentFen = chess.fen();
-      const activeFenHistory = currentFenHistory || gameFenHistory;
-
       stockfishService.calculateMove(
         currentFen,
         personality,
-        activeFenHistory,
+        gameFenHistoryRef.current,
         (bestMoveStr) => {
-          if (!bestMoveStr || bestMoveStr.length < 4) {
-            isBotThinkingRef.current = false;
-            setIsBotTurn(false);
-            return;
-          }
-
           try {
+            if (!bestMoveStr || bestMoveStr.length < 4) {
+              return;
+            }
+
             const from = bestMoveStr.substring(0, 2) as Square;
             const to = bestMoveStr.substring(2, 4) as Square;
             const promotion = bestMoveStr.length > 4 ? bestMoveStr[4] : undefined;
 
             const pieceOnFrom = chess.get(from);
 
-            // Execute the recommended move for our side
+            // Execute the winning move for targetColor
             const result = chess.move({ from, to, promotion });
             if (result) {
               const newFen = chess.fen();
-              setGameFenHistory((prev) => [...prev, newFen]);
+              gameFenHistoryRef.current = [...gameFenHistoryRef.current, newFen];
+              setGameFenHistory(gameFenHistoryRef.current);
               setLastMove({ from, to });
 
               // Render single tactical arrow
@@ -160,26 +162,56 @@ export default function App() {
               setHistory((prev) => [...prev, record]);
 
               checkGameOver();
+
+              // Trigger state update to dispatch next reactive turn
+              setFen(newFen);
             }
           } catch (err) {
-            console.error('Error applying bot move:', err);
+            console.error('Error executing Lion move:', err);
           } finally {
             isBotThinkingRef.current = false;
-            setIsBotTurn(false);
+            setIsBotThinking(false);
           }
         }
       );
     },
-    [chess, personality, gameFenHistory, checkGameOver]
+    [chess, personality, checkGameOver]
   );
 
   // =========================================================================
-  // USER INPUT (OPPONENT MOVES)
+  // SURGICAL REACTIVE TURN DISPATCHER
+  // =========================================================================
+
+  useEffect(() => {
+    if (isSetupModalOpen) return;
+    if (chess.isGameOver()) return;
+
+    const turn = chess.turn(); // 'w' or 'b'
+    if (userColor !== 'both' && turn === userColor) {
+      setIsBoardLocked(true);
+      setStatusText("🦁 LION thinking for " + (userColor === 'w' ? 'White' : 'Black'));
+      executeBotMoveFor(userColor);
+    } else {
+      setIsBoardLocked(false);
+      setStatusText("Your turn — input " + (userColor === 'w' ? 'Black' : 'White') + "'s move");
+    }
+  }, [fen, userColor, isSetupModalOpen, chess, executeBotMoveFor]);
+
+  // =========================================================================
+  // USER INPUT (OPPONENT MOVES ONLY)
   // =========================================================================
 
   const handleOpponentMove = useCallback(
     (move: { from: string; to: string; promotion?: string }): boolean => {
-      if (isBotThinkingRef.current || isBotTurn) return false;
+      const turn = chess.turn();
+
+      // Rule: User is NEVER allowed to move their own color
+      if (userColor !== 'both' && turn === userColor) {
+        return false;
+      }
+      if (isBotThinkingRef.current) {
+        return false;
+      }
 
       try {
         const currentFen = chess.fen();
@@ -187,8 +219,8 @@ export default function App() {
         if (!result) return false;
 
         const newFen = chess.fen();
-        const updatedFenHistory = [...gameFenHistory, newFen];
-        setGameFenHistory(updatedFenHistory);
+        gameFenHistoryRef.current = [...gameFenHistoryRef.current, newFen];
+        setGameFenHistory(gameFenHistoryRef.current);
         setLastMove({ from: move.from, to: move.to });
 
         // Clear previous bot indicators
@@ -219,22 +251,18 @@ export default function App() {
         };
         setHistory((prev) => [...prev, record]);
 
-        const isOver = checkGameOver();
+        checkGameOver();
 
-        // If game continues, immediately trigger the assistant's counter-move!
-        if (!isOver) {
-          setTimeout(() => {
-            executeBotCounterMove(updatedFenHistory);
-          }, 150);
-        }
+        // Updating fen triggers the reactive turn dispatcher
+        setFen(newFen);
 
         return true;
       } catch (err) {
-        console.error('Move validation error:', err);
+        console.error('Opponent move error:', err);
         return false;
       }
     },
-    [chess, isBotTurn, gameFenHistory, checkGameOver, executeBotCounterMove]
+    [chess, userColor, checkGameOver]
   );
 
   // God Mode direct board mutation
@@ -242,25 +270,17 @@ export default function App() {
     (newFen: string) => {
       try {
         chess.load(newFen);
-        setGameFenHistory((prev) => [...prev, newFen]);
+        gameFenHistoryRef.current = [...gameFenHistoryRef.current, newFen];
+        setGameFenHistory(gameFenHistoryRef.current);
         setBotArrow(null);
         setGhostPiece(null);
         checkGameOver();
-
-        // If it's the assistant's turn after manual board change, calculate best move
-        const isBotColor =
-          (playerColor === 'w' && chess.turn() === 'w') ||
-          (playerColor === 'b' && chess.turn() === 'b');
-        if (isBotColor && !chess.isGameOver()) {
-          setTimeout(() => {
-            executeBotCounterMove();
-          }, 200);
-        }
+        setFen(newFen);
       } catch (err) {
         console.error('God Mode Board update error:', err);
       }
     },
-    [chess, playerColor, checkGameOver, executeBotCounterMove]
+    [chess, checkGameOver]
   );
 
   // Setup / Start Game Trigger
@@ -274,12 +294,11 @@ export default function App() {
       stockfishService.reset();
       chess.load(config.startingFen);
 
-      setPersonality(config.personality);
-      setActiveVariant(config.variant);
-      setPlayerColor(config.playerColor);
-      setIsFlipped(config.playerColor === 'b');
+      setUserColor(config.playerColor);
+      setIsFlipped(config.playerColor === 'b'); // Flip board so user's color is at the bottom
 
       setHistory([]);
+      gameFenHistoryRef.current = [config.startingFen];
       setGameFenHistory([config.startingFen]);
       setLastMove(null);
       setBotArrow(null);
@@ -287,21 +306,17 @@ export default function App() {
       setGameOverInfo({ isOver: false, title: '', description: '', winner: null });
       setIsSetupModalOpen(false);
 
-      // If user chose Black, bot moves first immediately
-      if (config.playerColor === 'b' && chess.turn() === 'w') {
-        setTimeout(() => {
-          executeBotCounterMove([config.startingFen]);
-        }, 300);
-      }
+      // Trigger the reactive dispatcher
+      setFen(config.startingFen);
     },
-    [chess, executeBotCounterMove]
+    [chess]
   );
 
   // Open Main Menu: Stop engine, reset state, and reopen setup modal
   const handleOpenMainMenu = useCallback(() => {
     stockfishService.reset();
     isBotThinkingRef.current = false;
-    setIsBotTurn(false);
+    setIsBotThinking(false);
     setBotArrow(null);
     setGhostPiece(null);
     setGameOverInfo({ isOver: false, title: '', description: '', winner: null });
@@ -322,9 +337,9 @@ export default function App() {
       {/* Sleek Minimalist Top Status Bar with Single Main Menu Button */}
       <Header
         personality={personality}
-        playerColor={playerColor}
+        userColor={userColor}
         activeTurn={chess.turn()}
-        isEngineThinking={isBotTurn}
+        isEngineThinking={isBotThinking}
         onOpenMainMenu={handleOpenMainMenu}
       />
 
@@ -340,18 +355,24 @@ export default function App() {
             lastMove={lastMove}
             botArrow={botArrow}
             ghostPiece={ghostPiece}
-            isBotTurn={isBotTurn}
+            isBotTurn={isBoardLocked}
             isGameOver={gameOverInfo.isOver}
             isGodModeUnlocked={isGodModeUnlocked}
             setIsGodModeUnlocked={setIsGodModeUnlocked}
           />
 
-          {/* Minimal Status Hint Pill */}
-          <div className="w-full flex items-center justify-between px-4 py-2 rounded-2xl bg-[#0b101c]/80 border border-[#d4af37]/20 text-xs text-amber-100/70 shadow-md backdrop-blur-md">
+          {/* Minimal Status Hint Pill - ABSOLUTE TRUTH */}
+          <div className="w-full flex items-center justify-between px-4 py-2.5 rounded-2xl bg-[#0b101c]/80 border border-[#d4af37]/20 text-xs text-amber-100/70 shadow-md backdrop-blur-md">
             <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
-              <span>
-                Helping <strong className="text-[#d4af37]">{playerColor === 'w' ? 'White' : 'Black'}</strong>. Input opponent's move.
+              <span
+                className={`w-2.5 h-2.5 rounded-full ${
+                  isBoardLocked
+                    ? 'bg-amber-400 animate-ping'
+                    : 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]'
+                }`}
+              />
+              <span className="font-medium text-amber-200/90">
+                {statusText}
               </span>
             </div>
             <div className="text-[11px] text-amber-200/50 hidden sm:block">

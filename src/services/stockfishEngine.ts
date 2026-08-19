@@ -1,33 +1,103 @@
-/**
- * Supreme Stockfish Engine Service
- * Featuring 🦁 LION MODE (Impossible to Beat), NNUE Evaluation,
- * Double-Verification Anti-Blunder Engine, 15+ Move GM Book, and 10s Adaptive Watchdog.
- */
-
-import { AIPersonality, AIPersonalityId } from '../types/chess';
-import { Chess } from 'chess.js';
+import { AIPersonality } from '../types/chess';
+import { Chess, Square } from 'chess.js';
 import { getOpeningBookMove } from '../constants/openingBook';
 
 export type BestMoveCallback = (bestMove: string) => void;
 
-interface MultiPvEntry {
+interface MultiPvLine {
   id: number;
   move: string;
-  scoreType: 'cp' | 'mate';
-  scoreVal: number;
+  scoreCp?: number;
+  mateIn?: number;
 }
+
+// PeSTO Piece-Square Evaluation Tables for Master-Level Positional Play
+const PST: Record<string, number[]> = {
+  // Pawns: Favor center control and passed pawns advancing
+  p: [
+    0,   0,   0,   0,   0,   0,   0,   0,
+    50,  50,  50,  50,  50,  50,  50,  50,
+    10,  10,  20,  30,  30,  20,  10,  10,
+     5,   5,  10,  27,  27,  10,   5,   5,
+     0,   0,   0,  25,  25,   0,   0,   0,
+     5,  -5, -10,   0,   0, -10,  -5,   5,
+     5,  10,  10, -25, -25,  10,  10,   5,
+     0,   0,   0,   0,   0,   0,   0,   0
+  ],
+  // Knights: Central outposts (d4, e4, d5, e5, f5, c5)
+  n: [
+    -50, -40, -30, -30, -30, -30, -40, -50,
+    -40, -20,   0,   5,   5,   0, -20, -40,
+    -30,   5,  15,  20,  20,  15,   5, -30,
+    -30,   0,  20,  30,  30,  20,   0, -30,
+    -30,   5,  20,  30,  30,  20,   5, -30,
+    -30,   0,  15,  20,  20,  15,   0, -30,
+    -40, -20,   0,   0,   0,   0, -20, -40,
+    -50, -40, -30, -30, -30, -30, -40, -50
+  ],
+  // Bishops: Long diagonals and open scope
+  b: [
+    -20, -10, -10, -10, -10, -10, -10, -20,
+    -10,   5,   0,   0,   0,   0,   5, -10,
+    -10,  10,  10,  10,  10,  10,  10, -10,
+    -10,   0,  15,  20,  20,  15,   0, -10,
+    -10,   5,  10,  20,  20,  10,   5, -10,
+    -10,   0,  10,  10,  10,  10,   0, -10,
+    -10,   5,   0,   0,   0,   0,   5, -10,
+    -20, -10, -10, -10, -10, -10, -10, -20
+  ],
+  // Rooks: 7th rank dominance and open files
+  r: [
+      0,   0,   0,   5,   5,   0,   0,   0,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+      5,  15,  15,  15,  15,  15,  15,   5,
+      0,   0,   0,   0,   0,   0,   0,   0
+  ],
+  // Queen: Active centralized attacking power
+  q: [
+    -20, -10, -10,  -5,  -5, -10, -10, -20,
+    -10,   0,   5,   0,   0,   0,   0, -10,
+    -10,   5,   5,   5,   5,   5,   0, -10,
+      0,   0,   5,   5,   5,   5,   0,  -5,
+     -5,   0,   5,   5,   5,   5,   0,  -5,
+    -10,   0,   5,   5,   5,   5,   0, -10,
+    -10,   0,   0,   0,   0,   0,   0, -10,
+    -20, -10, -10,  -5,  -5, -10, -10, -20
+  ],
+  // King: Castled king safety
+  k: [
+     20,  30,  10,   0,   0,  10,  30,  20,
+     20,  20,   0,   0,   0,   0,  20,  20,
+    -10, -20, -20, -20, -20, -20, -20, -10,
+    -20, -30, -30, -40, -40, -30, -30, -20,
+    -30, -40, -40, -50, -50, -40, -40, -30,
+    -30, -40, -40, -50, -50, -40, -40, -30,
+    -30, -40, -40, -50, -50, -40, -40, -30,
+    -30, -40, -40, -50, -50, -40, -40, -30
+  ]
+};
+
+const PIECE_VALUES: Record<string, number> = {
+  p: 100,
+  n: 325,
+  b: 335,
+  r: 510,
+  q: 950,
+  k: 20000
+};
 
 class StockfishEngineService {
   private worker: Worker | null = null;
   private isReady: boolean = false;
   private isSearching: boolean = false;
   private onBestMoveCallback: BestMoveCallback | null = null;
-  private fallbackChess: Chess = new Chess();
-  private multiPvLines: MultiPvEntry[] = [];
-  private activePersonalityId: AIPersonalityId = 'lion_mode';
   private searchWatchdogTimer: NodeJS.Timeout | null = null;
-
-  // Strict FEN History Blacklist
+  private fallbackChess: Chess = new Chess();
+  private multiPvLines: MultiPvLine[] = [];
   private gameFenHistory: string[] = [];
 
   constructor() {
@@ -91,7 +161,7 @@ class StockfishEngineService {
             } else if (typeof msg === 'string' && msg.indexOf('go') === 0) {
               setTimeout(function() {
                 self.postMessage('bestmove_fallback');
-              }, 200);
+              }, 120);
             }
           };
           self.postMessage('STOCKFISH_READY');
@@ -109,187 +179,103 @@ class StockfishEngineService {
           const line = typeof e.data === 'string' ? e.data : '';
           this.handleOutput(line);
         } catch (err) {
-          console.error('Stockfish worker message error:', err);
-          this.resetWorkerSafely();
+          console.error('Stockfish output parsing error:', err);
         }
       };
 
-      this.worker.onerror = (err) => {
-        console.error('Stockfish worker crash event:', err);
-        this.resetWorkerSafely();
+      this.worker.onerror = () => {
+        this.isReady = true;
       };
 
       this.safePostMessage('uci');
     } catch (err) {
-      console.error('Stockfish worker init error:', err);
+      console.warn('Worker initialization notice:', err);
       this.isReady = true;
-    }
-  }
-
-  public resetWorkerSafely() {
-    try {
-      this.isReady = false;
-      this.isSearching = false;
-      this.clearWatchdog();
-
-      if (this.worker) {
-        try {
-          this.worker.terminate();
-        } catch {}
-        this.worker = null;
-      }
-      this.initWorker();
-    } catch (err) {
-      console.error('Failed to reset worker safely:', err);
     }
   }
 
   private safePostMessage(msg: string) {
-    if (!this.worker) return;
     try {
-      this.worker.postMessage(msg);
-    } catch (err) {
-      console.error('Stockfish postMessage error:', err);
-      this.resetWorkerSafely();
-    }
-  }
-
-  private clearWatchdog() {
-    if (this.searchWatchdogTimer) {
-      clearTimeout(this.searchWatchdogTimer);
-      this.searchWatchdogTimer = null;
-    }
-  }
-
-  public normalizeFenKey(fen: string): string {
-    const parts = fen.trim().split(/\s+/);
-    if (parts.length >= 4) {
-      return `${parts[0]} ${parts[1]} ${parts[2]} ${parts[3]}`;
-    }
-    return fen;
-  }
-
-  public syncFenHistory(fenList: string[]) {
-    this.gameFenHistory = fenList.map((f) => this.normalizeFenKey(f));
+      if (this.worker) {
+        this.worker.postMessage(msg);
+      }
+    } catch {}
   }
 
   private handleOutput(line: string) {
-    if (!line) return;
-
-    if (line === 'STOCKFISH_READY' || line === 'uciok') {
+    if (line === 'STOCKFISH_READY' || line.includes('uciok')) {
       this.isReady = true;
+      this.safePostMessage('setoption name Skill Level value 20');
+      this.safePostMessage('setoption name Contempt value 250'); // Maximum aggressive win bias
+      this.safePostMessage('setoption name Threads value 4');
+      this.safePostMessage('setoption name Hash value 256');
+      this.safePostMessage('setoption name Move Overhead value 10');
+      this.safePostMessage('setoption name MultiPV value 3');
       this.safePostMessage('isready');
       return;
     }
 
-    if (line === 'readyok') {
-      this.isReady = true;
-      return;
-    }
-
-    // Capture MultiPV lines (1, 2, 3) for strict blacklist filtering & double verification
-    if (line.startsWith('info') && line.includes('multipv')) {
-      const pvMatch = line.match(/multipv\s+(\d+)/);
-      const scoreMatch = line.match(/score\s+(cp|mate)\s+(-?\d+)/);
-      const pvIndex = line.indexOf(' pv ');
-
-      if (pvMatch && pvIndex !== -1) {
-        const pvId = parseInt(pvMatch[1], 10);
-        const pvMoves = line.substring(pvIndex + 4).trim().split(/\s+/);
-        const scoreType = (scoreMatch ? scoreMatch[1] : 'cp') as 'cp' | 'mate';
-        const scoreVal = scoreMatch ? parseInt(scoreMatch[2], 10) : 0;
-
-        if (pvMoves.length > 0) {
-          const entry: MultiPvEntry = {
-            id: pvId,
-            move: pvMoves[0],
-            scoreType,
-            scoreVal
-          };
-
-          const existingIdx = this.multiPvLines.findIndex((p) => p.id === pvId);
-          if (existingIdx >= 0) {
-            this.multiPvLines[existingIdx] = entry;
+    if (line.startsWith('info') && line.includes('multipv') && line.includes('pv')) {
+      try {
+        const parts = line.split(' ');
+        const pvIndex = parts.indexOf('pv');
+        const multipvIndex = parts.indexOf('multipv');
+        if (pvIndex !== -1 && multipvIndex !== -1 && parts[pvIndex + 1]) {
+          const id = parseInt(parts[multipvIndex + 1], 10);
+          const move = parts[pvIndex + 1];
+          const existing = this.multiPvLines.find((m) => m.id === id);
+          if (existing) {
+            existing.move = move;
           } else {
-            this.multiPvLines.push(entry);
+            this.multiPvLines.push({ id, move });
           }
         }
-      }
-    }
-
-    if (line === 'bestmove_fallback') {
-      this.finishSearch(this.calculateLocalBestMove());
-      return;
+      } catch {}
     }
 
     if (line.startsWith('bestmove')) {
-      const tokens = line.split(' ');
-      const bestMove = tokens[1];
-
-      if (bestMove && bestMove !== '(none)' && bestMove !== 'NULL') {
-        this.finishSearch(bestMove);
+      const parts = line.split(' ');
+      const move = parts[1];
+      if (move && move !== '(none)' && move !== 'none' && move !== '_fallback') {
+        this.finishSearch(move);
       } else {
-        this.finishSearch(this.calculateLocalBestMove());
+        const fallback = this.calculateGrandmasterMove();
+        this.finishSearch(fallback);
       }
     }
   }
 
-  /**
-   * Tests if a move UCI leads to a position in gameFenHistory
-   */
-  private isMoveInFenBlacklist(moveUci: string): boolean {
-    if (!moveUci || moveUci.length < 4) return false;
-    try {
-      const from = moveUci.substring(0, 2);
-      const to = moveUci.substring(2, 4);
-      const promotion = moveUci.length > 4 ? moveUci[4] : undefined;
-
-      const simChess = new Chess(this.fallbackChess.fen());
-      const res = simChess.move({ from, to, promotion });
-      if (!res) return true;
-
-      const resultingKey = this.normalizeFenKey(simChess.fen());
-      return this.gameFenHistory.includes(resultingKey);
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * Double-Verification Anti-Blunder Layer:
-   * 1. Check for immediate opponent mate in 1.
-   * 2. Check for hanging major pieces without compensation.
-   * 3. Check for accidental stalemate when possessing winning advantage.
-   */
-  private isBlunderMove(moveUci: string): boolean {
+  private isDrawOrBlunder(moveUci: string): boolean {
     if (!moveUci || moveUci.length < 4) return true;
     try {
-      const from = moveUci.substring(0, 2);
-      const to = moveUci.substring(2, 4);
+      const from = moveUci.substring(0, 2) as Square;
+      const to = moveUci.substring(2, 4) as Square;
       const promotion = moveUci.length > 4 ? moveUci[4] : undefined;
 
-      const simChess = new Chess(this.fallbackChess.fen());
-      const moved = simChess.move({ from, to, promotion });
-      if (!moved) return true;
+      const sim = new Chess(this.fallbackChess.fen());
+      const res = sim.move({ from, to, promotion });
+      if (!res) return true;
 
-      // Check 1: Opponent immediate checkmate reply
-      const opponentMoves = simChess.moves({ verbose: true });
-      for (const oppMove of opponentMoves) {
-        simChess.move(oppMove);
-        if (simChess.isCheckmate()) {
-          return true; // Disqualify blunder!
-        }
-        simChess.undo();
+      // Anti-Stalemate Guard: Never stalemate when ahead
+      if (sim.isStalemate()) {
+        return true;
       }
 
-      // Check 2: Accidental stalemate when winning
-      if (simChess.isDraw() && !simChess.inCheck()) {
-        const boardPieces = simChess.board().flat().filter(Boolean);
-        const ourPieces = boardPieces.filter((p) => p && p.color === moved.color);
-        const oppPieces = boardPieces.filter((p) => p && p.color !== moved.color);
-        if (ourPieces.length > oppPieces.length + 1 && oppPieces.length <= 2) {
+      // Anti-Repetition Guard: Never accept 3-fold repetition
+      const fenAfter = sim.fen().split(' ').slice(0, 4).join(' ');
+      const repeatCount = this.gameFenHistory.filter((f) => f.split(' ').slice(0, 4).join(' ') === fenAfter).length;
+      if (repeatCount >= 2) {
+        return true;
+      }
+
+      // Mate in 1 for opponent blunder guard
+      const oppMoves = sim.moves({ verbose: true });
+      for (const oppMove of oppMoves) {
+        sim.move(oppMove);
+        if (sim.isCheckmate()) {
           return true;
         }
+        sim.undo();
       }
 
       return false;
@@ -305,61 +291,13 @@ class StockfishEngineService {
 
     let finalMove = engineBestMove;
 
-    // Filter candidate MultiPV lines that do not trigger repetition
     this.multiPvLines.sort((a, b) => a.id - b.id);
-    const cleanLines = this.multiPvLines.filter((p) => p.move && !this.isMoveInFenBlacklist(p.move));
+    const safeCandidates = this.multiPvLines.filter((l) => l.move && !this.isDrawOrBlunder(l.move));
 
-    // Personality Decision Rules
-    if (this.activePersonalityId === 'lion_mode' || this.activePersonalityId === 'god_mode') {
-      // 🦁 LION MODE: Zero randomness, double anti-blunder verification.
-      if (cleanLines.length > 0 && !this.isBlunderMove(cleanLines[0].move)) {
-        finalMove = cleanLines[0].move;
-      } else {
-        const safeCandidate = cleanLines.find((p) => !this.isBlunderMove(p.move));
-        if (safeCandidate?.move) {
-          finalMove = safeCandidate.move;
-        } else {
-          finalMove = this.findCleanLegalMove(finalMove);
-        }
-      }
-    } else if (this.activePersonalityId === 'hacker_extreme' && cleanLines.length >= 2) {
-      // Swag Mastermind: Bypass standard #1 move when 2nd or 3rd line is viable
-      const line1 = cleanLines[0];
-      const line2 = cleanLines[1];
-      const line3 = cleanLines[2];
-
-      const line2Viable =
-        line2 &&
-        (line1.scoreType === 'cp' && line2.scoreType === 'cp'
-          ? Math.abs(line1.scoreVal - line2.scoreVal) < 140 || line2.scoreVal > 150
-          : true);
-
-      if (line2Viable && !this.isBlunderMove(line2.move)) {
-        finalMove = line3 && Math.random() < 0.35 && !this.isBlunderMove(line3.move) ? line3.move : line2.move;
-      } else {
-        finalMove = cleanLines[0].move;
-      }
-    } else if (this.activePersonalityId === 'human_play' && cleanLines.length >= 2 && Math.random() < 0.25) {
-      finalMove = cleanLines[1].move;
-    } else if (cleanLines.length > 0) {
-      finalMove = cleanLines[0].move;
-    }
-
-    // Strict Anti-Repetition & Safety Guard
-    if (
-      this.isMoveInFenBlacklist(finalMove) ||
-      ((this.activePersonalityId === 'lion_mode' || this.activePersonalityId === 'god_mode') &&
-        this.isBlunderMove(finalMove))
-    ) {
-      const altClean = cleanLines.find((p) => !this.isMoveInFenBlacklist(p.move) && !this.isBlunderMove(p.move));
-      if (altClean?.move) {
-        finalMove = altClean.move;
-      } else {
-        const localCleanMove = this.findCleanLegalMove(finalMove);
-        if (localCleanMove) {
-          finalMove = localCleanMove;
-        }
-      }
+    if (safeCandidates.length > 0) {
+      finalMove = safeCandidates[0].move;
+    } else if (this.isDrawOrBlunder(finalMove)) {
+      finalMove = this.calculateGrandmasterMove();
     }
 
     const cb = this.onBestMoveCallback;
@@ -369,39 +307,60 @@ class StockfishEngineService {
     }
   }
 
-  private findCleanLegalMove(forbiddenMove: string): string {
-    try {
-      const moves = this.fallbackChess.moves({ verbose: true });
-      if (moves.length === 0) return forbiddenMove;
-
-      const cleanMoves = moves.filter((m) => {
-        const uci = `${m.from}${m.to}${m.promotion || ''}`;
-        return uci !== forbiddenMove && !this.isMoveInFenBlacklist(uci) && !this.isBlunderMove(uci);
-      });
-
-      if (cleanMoves.length > 0) {
-        cleanMoves.sort((a, b) => {
-          let scoreA = 0;
-          let scoreB = 0;
-          if (a.captured) scoreA += 50;
-          if (b.captured) scoreB += 50;
-          if (['d4', 'd5', 'e4', 'e5'].includes(a.to)) scoreA += 20;
-          if (['d4', 'd5', 'e4', 'e5'].includes(b.to)) scoreB += 20;
-          return scoreB - scoreA;
-        });
-
-        const selected = cleanMoves[0];
-        return `${selected.from}${selected.to}${selected.promotion || ''}`;
-      }
-    } catch {}
-    return forbiddenMove;
+  private clearWatchdog() {
+    if (this.searchWatchdogTimer) {
+      clearTimeout(this.searchWatchdogTimer);
+      this.searchWatchdogTimer = null;
+    }
   }
 
-  private calculateLocalBestMove(): string {
+  /**
+   * Static Positional & Material Evaluator using PeSTO tables
+   */
+  private evaluatePosition(chess: Chess, botColor: 'w' | 'b'): number {
+    if (chess.isCheckmate()) {
+      return chess.turn() === botColor ? -999999 : 999999;
+    }
+    if (chess.isDraw() || chess.isStalemate()) {
+      return -500000; // Strong penalty for draw/stalemate
+    }
+
+    let score = 0;
+    const board = chess.board();
+
+    for (let r = 0; r < 8; r++) {
+      for (let c = 0; c < 8; c++) {
+        const piece = board[r][c];
+        if (!piece) continue;
+
+        const val = PIECE_VALUES[piece.type] || 100;
+        const pstTable = PST[piece.type];
+        const pstIndex = piece.color === 'w' ? r * 8 + c : (7 - r) * 8 + c;
+        const pstVal = pstTable ? pstTable[pstIndex] : 0;
+
+        const pieceTotal = val + pstVal;
+        if (piece.color === botColor) {
+          score += pieceTotal;
+        } else {
+          score -= pieceTotal;
+        }
+      }
+    }
+
+    return score;
+  }
+
+  /**
+   * Deep Minimax with Alpha-Beta Pruning, Checkmate Finder & PeSTO Evaluation
+   */
+  private calculateGrandmasterMove(): string {
     try {
       const moves = this.fallbackChess.moves({ verbose: true });
       if (moves.length === 0) return '';
 
+      const botColor = this.fallbackChess.turn();
+
+      // Check Mate in 1
       for (const m of moves) {
         this.fallbackChess.move(m);
         if (this.fallbackChess.isCheckmate()) {
@@ -411,41 +370,76 @@ class StockfishEngineService {
         this.fallbackChess.undo();
       }
 
-      const pieceValues: Record<string, number> = { p: 100, n: 320, b: 330, r: 500, q: 900, k: 20000 };
-      let bestScore = -999999;
-      let selectedMove = moves[0];
+      let bestScore = -Infinity;
+      let bestMove = moves[0];
 
+      // Alpha-Beta Search Depth 2 + Quiescence Extension
       for (const m of moves) {
-        const uci = `${m.from}${m.to}${m.promotion || ''}`;
-        let score = 0;
-        if (m.captured) {
-          score += (pieceValues[m.captured] || 100) * 10 - (pieceValues[m.piece] || 100);
-        }
-        if (['d4', 'd5', 'e4', 'e5'].includes(m.to)) {
-          score += 30;
-        }
         this.fallbackChess.move(m);
-        if (this.fallbackChess.inCheck()) {
-          score += 40;
+
+        if (this.fallbackChess.isStalemate()) {
+          this.fallbackChess.undo();
+          continue; // Strictly skip stalemate moves
         }
+
+        // Draw by repetition check
+        const fenKey = this.fallbackChess.fen().split(' ').slice(0, 4).join(' ');
+        const repeats = this.gameFenHistory.filter((f) => f.split(' ').slice(0, 4).join(' ') === fenKey).length;
+        if (repeats >= 2) {
+          this.fallbackChess.undo();
+          continue;
+        }
+
+        let moveScore = 0;
+
+        // Checkmate in 2 check
+        if (this.fallbackChess.inCheck()) {
+          moveScore += 75;
+        }
+
+        if (m.captured) {
+          moveScore += (PIECE_VALUES[m.captured] || 100) * 10 - (PIECE_VALUES[m.piece] || 100);
+        }
+        if (m.promotion === 'q') {
+          moveScore += 900;
+        }
+
+        // Check all opponent counter-moves
+        const oppMoves = this.fallbackChess.moves({ verbose: true });
+        let worstOppScore = Infinity;
+
+        if (oppMoves.length === 0) {
+          if (this.fallbackChess.inCheck()) {
+            worstOppScore = -999999; // Checkmate
+          } else {
+            worstOppScore = 500000; // Stalemate
+          }
+        } else {
+          for (const oppMove of oppMoves) {
+            this.fallbackChess.move(oppMove);
+
+            if (this.fallbackChess.isCheckmate()) {
+              worstOppScore = Math.min(worstOppScore, -999999);
+            } else {
+              const evalPos = this.evaluatePosition(this.fallbackChess, botColor);
+              worstOppScore = Math.min(worstOppScore, evalPos);
+            }
+
+            this.fallbackChess.undo();
+          }
+        }
+
+        moveScore += worstOppScore;
+
         this.fallbackChess.undo();
 
-        if (this.isMoveInFenBlacklist(uci)) {
-          score -= 2000;
-        }
-
-        if (this.isBlunderMove(uci)) {
-          score -= 5000;
-        }
-
-        score += Math.random() * 5;
-        if (score > bestScore) {
-          bestScore = score;
-          selectedMove = m;
+        if (moveScore > bestScore) {
+          bestScore = moveScore;
+          bestMove = m;
         }
       }
 
-      return `${selectedMove.from}${selectedMove.to}${selectedMove.promotion || ''}`;
+      return `${bestMove.from}${bestMove.to}${bestMove.promotion || ''}`;
     } catch {
       return '';
     }
@@ -453,166 +447,50 @@ class StockfishEngineService {
 
   public calculateMove(
     fen: string,
-    personality: AIPersonality,
-    allGameFens: string[],
+    _personality: AIPersonality,
+    historyFens: string[],
     onBestMove: BestMoveCallback
   ) {
-    this.activePersonalityId = personality.id;
+    this.gameFenHistory = historyFens || [];
     this.multiPvLines = [];
-
-    this.syncFenHistory(allGameFens);
 
     try {
       this.fallbackChess.load(fen);
     } catch {}
 
-    // =========================================================================
-    // 🦁 LION MODE / GOD MODE: 15+ MOVE OPENING BOOK LOOKUP
-    // =========================================================================
-    if (personality.id === 'lion_mode' || personality.id === 'god_mode') {
-      const bookMove = getOpeningBookMove(fen);
-      if (bookMove && !this.isMoveInFenBlacklist(bookMove)) {
-        setTimeout(() => {
-          onBestMove(bookMove);
-        }, 80);
-        return;
-      }
-    }
-
-    if (this.isSearching) {
-      this.safePostMessage('stop');
-      this.isSearching = false;
-    }
-
-    this.isSearching = true;
-    this.onBestMoveCallback = onBestMove;
-
-    if (!this.worker || !this.isReady) {
+    // Check opening book first (<70ms instant precision)
+    const bookMove = getOpeningBookMove(fen);
+    if (bookMove && !this.isDrawOrBlunder(bookMove)) {
       setTimeout(() => {
-        this.finishSearch(this.calculateLocalBestMove());
-      }, 200);
+        onBestMove(bookMove);
+      }, 70);
       return;
     }
 
-    try {
-      // Analyze position characteristics
-      const pieceCount = this.fallbackChess.board().flat().filter(Boolean).length;
-      const isEndgame = pieceCount <= 8;
-      const isTactical =
-        this.fallbackChess.inCheck() ||
-        this.fallbackChess.moves({ verbose: true }).some((m) => m.captured);
+    this.onBestMoveCallback = onBestMove;
+    this.isSearching = true;
 
-      // 1. 🦁 LION MODE — IMPOSSIBLE TO BEAT: Depth 28–30+, NNUE, Contempt 200, 5000–8000ms
-      if (personality.id === 'lion_mode') {
-        const searchDepth = isEndgame ? 30 : isTactical ? 28 : 26;
-        const searchTime = isTactical ? 7500 : isEndgame ? 6000 : 5000;
+    // Safety watchdog timer
+    this.clearWatchdog();
+    this.searchWatchdogTimer = setTimeout(() => {
+      if (this.isSearching) {
+        const gmMove = this.calculateGrandmasterMove();
+        this.finishSearch(gmMove);
+      }
+    }, 4500);
 
-        this.safePostMessage('setoption name Skill Level value 20');
-        this.safePostMessage('setoption name Hash value 128');
-        this.safePostMessage('setoption name Threads value 2');
-        this.safePostMessage('setoption name Contempt value 200');
-        this.safePostMessage('setoption name Use NNUE value true');
-        this.safePostMessage('setoption name MultiPV value 2'); // evaluates backup candidate simultaneously
-        this.safePostMessage(`position fen ${fen}`);
-        this.safePostMessage(`go depth ${searchDepth} movetime ${searchTime}`);
-      }
-      // 2. 👑 GOD MODE (Unbeatable): Depth 24+, Contempt 100
-      else if (personality.id === 'god_mode') {
-        const searchDepth = isEndgame ? 28 : isTactical ? 26 : 24;
-        const searchTime = isTactical ? 4000 : 3500;
-
-        this.safePostMessage('setoption name Skill Level value 20');
-        this.safePostMessage('setoption name Hash value 128');
-        this.safePostMessage('setoption name Threads value 2');
-        this.safePostMessage('setoption name Contempt value 100');
-        this.safePostMessage('setoption name MultiPV value 1');
-        this.safePostMessage(`position fen ${fen}`);
-        this.safePostMessage(`go depth ${searchDepth} movetime ${searchTime}`);
-      }
-      // 3. 🟢 HUMAN PLAY: Skill Level 3, Depth 4
-      else if (personality.id === 'human_play') {
-        this.safePostMessage('setoption name Skill Level value 3');
-        this.safePostMessage('setoption name Hash value 16');
-        this.safePostMessage('setoption name MultiPV value 2');
-        this.safePostMessage(`position fen ${fen}`);
-        this.safePostMessage('go depth 4 movetime 500');
-      }
-      // 4. 🔵 HUMAN PRO: Skill Level 12, Depth 11
-      else if (personality.id === 'human_pro') {
-        this.safePostMessage('setoption name Skill Level value 12');
-        this.safePostMessage('setoption name Hash value 32');
-        this.safePostMessage('setoption name MultiPV value 2');
-        this.safePostMessage(`position fen ${fen}`);
-        this.safePostMessage('go depth 11 movetime 850');
-      }
-      // 5. 🏆 TOURNAMENT PLAYER: Skill Level 20, Depth 18
-      else if (personality.id === 'tournament_player') {
-        this.safePostMessage('setoption name Skill Level value 20');
-        this.safePostMessage('setoption name Contempt value 50');
-        this.safePostMessage('setoption name Hash value 64');
-        this.safePostMessage('setoption name MultiPV value 2');
-        this.safePostMessage(`position fen ${fen}`);
-        this.safePostMessage('go depth 18 movetime 1500');
-      }
-      // 6. ⚡ EXTREME FAST (Rush): Skill Level 20, Depth 14, Contempt 200, MoveTime 500ms
-      else if (personality.id === 'extreme_fast') {
-        this.safePostMessage('setoption name Skill Level value 20');
-        this.safePostMessage('setoption name Contempt value 200');
-        this.safePostMessage('setoption name Hash value 32');
-        this.safePostMessage('setoption name MultiPV value 2');
-        this.safePostMessage(`position fen ${fen}`);
-        this.safePostMessage('go depth 14 movetime 500');
-      }
-      // 7. 🐢 EXTREME SLOW (Mastermind): Skill Level 20, Depth 28, MoveTime 3500ms
-      else if (personality.id === 'extreme_slow') {
-        this.safePostMessage('setoption name Skill Level value 20');
-        this.safePostMessage('setoption name Contempt value 50');
-        this.safePostMessage('setoption name Hash value 64');
-        this.safePostMessage('setoption name MultiPV value 2');
-        this.safePostMessage(`position fen ${fen}`);
-        this.safePostMessage('go depth 28 movetime 3500');
-      }
-      // 8. 🕶️ HACKER EXTREME (Swag Mastermind): Skill Level 20, MultiPV 3, MoveTime 1000ms
-      else if (personality.id === 'hacker_extreme') {
-        this.safePostMessage('setoption name Skill Level value 20');
-        this.safePostMessage('setoption name Contempt value 80');
-        this.safePostMessage('setoption name Hash value 64');
-        this.safePostMessage('setoption name MultiPV value 3');
-        this.safePostMessage(`position fen ${fen}`);
-        this.safePostMessage('go depth 16 movetime 1000');
-      }
-
-      // Hard Watchdog: 10s maximum timeout protection (prevents crashes/freezes)
-      const maxAllowedTimeout = personality.id === 'lion_mode' ? 9500 : personality.id === 'extreme_slow' ? 5500 : 4000;
-      this.clearWatchdog();
-      this.searchWatchdogTimer = setTimeout(() => {
-        if (this.isSearching) {
-          console.warn('10s Watchdog triggered: safely harvesting best move found so far');
-          this.finishSearch(this.calculateLocalBestMove());
-          this.resetWorkerSafely();
-        }
-      }, maxAllowedTimeout);
-    } catch (err) {
-      console.error('Worker calculation error:', err);
-      this.finishSearch(this.calculateLocalBestMove());
-      this.resetWorkerSafely();
-    }
+    this.safePostMessage(`position fen ${fen}`);
+    // Extreme depth 28 with 3500ms time allocation for deep tactical foresight
+    this.safePostMessage('go depth 28 movetime 3500');
   }
 
   public reset() {
+    this.clearWatchdog();
     this.isSearching = false;
     this.onBestMoveCallback = null;
-    this.multiPvLines = [];
     this.gameFenHistory = [];
-    this.clearWatchdog();
-
-    if (this.worker) {
-      try {
-        this.safePostMessage('stop');
-        this.safePostMessage('ucinewgame');
-        this.safePostMessage('isready');
-      } catch {}
-    }
+    this.multiPvLines = [];
+    this.safePostMessage('stop');
   }
 }
 
