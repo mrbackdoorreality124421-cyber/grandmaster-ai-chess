@@ -387,6 +387,9 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
             if (isGodHovered) {
               squareBg = 'bg-[#f59e0b]/90 ring-2 ring-[#d4af37] ring-inset';
             }
+            if (isKingInCheck) {
+              squareBg = 'king-in-check';
+            }
 
             return (
               <div
@@ -396,11 +399,6 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                 style={{ position: 'relative' }}
                 className={`relative w-full h-full flex items-center justify-center transition-colors duration-150 ${squareBg}`}
               >
-                {/* King in Check Red Glow Indicator */}
-                {isKingInCheck && (
-                  <div className="absolute inset-0 bg-red-600/60 rounded-full animate-ping pointer-events-none" />
-                )}
-
                 {/* Ghost Piece on Bot's Origin Square */}
                 {isGhostSquare && !piece && (
                   <div className="absolute inset-0 p-1 opacity-35 pointer-events-none animate-pulse">

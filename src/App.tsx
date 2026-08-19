@@ -1,17 +1,76 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { Chess, Square } from 'chess.js';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { Chess, Square, Move } from 'chess.js';
 import confetti from 'canvas-confetti';
-import { Trophy, RefreshCw } from 'lucide-react';
+import { Trophy, RefreshCw, AlertCircle } from 'lucide-react';
 
-import { LION_MODE, PRESET_VARIANTS } from './constants/chessData';
+import { LION_MODE } from './constants/chessData';
 import { AIPersonality, MoveRecord, PlayerColor, PresetVariant } from './types/chess';
-import { stockfishService } from './services/stockfishEngine';
+import {
+  stockfishService,
+  extractAnyValidMove,
+  sanitizeAndValidateFen
+} from './services/stockfishEngine';
 import { playChessSound } from './utils/audio';
 
 import { Header } from './components/Header';
 import { ChessBoard } from './components/ChessBoard';
 import { StartupModal } from './components/StartupModal';
 import { SplashScreen } from './components/SplashScreen';
+
+/**
+ * Universal Move Applier (Executes SAN, UCI string, or Move object)
+ */
+function applyAnyMove(
+  chess: Chess,
+  moveInput: string | { from: string; to: string; promotion?: string }
+): Move | null {
+  if (!moveInput) return null;
+
+  try {
+    // 1. If string: Try direct SAN (e.g. 'Nxe5', 'e4', 'O-O')
+    if (typeof moveInput === 'string') {
+      const raw = moveInput.trim();
+      try {
+        const res = chess.move(raw);
+        if (res) return res;
+      } catch {}
+
+      // 2. Try as UCI substring (e.g. 'e2e4' or 'e7e8q')
+      if (raw.length >= 4) {
+        try {
+          const from = raw.substring(0, 2) as Square;
+          const to = raw.substring(2, 4) as Square;
+          const promotion = raw.length > 4 ? raw[4].toLowerCase() : undefined;
+          const res = chess.move({ from, to, promotion });
+          if (res) return res;
+        } catch {}
+      }
+
+      // 3. Match against verbose legal moves
+      try {
+        const legals = chess.moves({ verbose: true });
+        const matched = legals.find(
+          (m) =>
+            m.san.toLowerCase() === raw.toLowerCase() ||
+            `${m.from}${m.to}${m.promotion || ''}`.toLowerCase() === raw.toLowerCase()
+        );
+        if (matched) {
+          return chess.move(matched);
+        }
+      } catch {}
+    } else {
+      // 4. Object format
+      try {
+        const res = chess.move(moveInput);
+        if (res) return res;
+      } catch {}
+    }
+  } catch (err) {
+    console.warn('applyAnyMove notice:', err);
+  }
+
+  return null;
+}
 
 export default function App() {
   // Splash Screen State
@@ -40,6 +99,7 @@ export default function App() {
   const isBotThinkingRef = useRef<boolean>(false);
   const [isBoardLocked, setIsBoardLocked] = useState<boolean>(false);
   const [statusText, setStatusText] = useState<string>('');
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // God Mode State
   const [isGodModeUnlocked, setIsGodModeUnlocked] = useState<boolean>(false);
@@ -88,7 +148,7 @@ export default function App() {
   }, [chess]);
 
   // =========================================================================
-  // 🦁 LION AUTOMATIC MOVE EXECUTION (PLAYS ONLY FOR targetColor)
+  // 🦁 LION AUTOMATIC MOVE EXECUTION (WITH ULTIMATE FAILSAFE - NEVER FREEZE)
   // =========================================================================
 
   const executeBotMoveFor = useCallback(
@@ -100,42 +160,121 @@ export default function App() {
       isBotThinkingRef.current = true;
       setIsBotThinking(true);
 
-      const currentFen = chess.fen();
+      const currentFen = sanitizeAndValidateFen(chess.fen());
+
+      let isResolved = false;
+
+      // 3. THE ULTIMATE FAILSAFE (NEVER FREEZE - 6-SECOND TIMEOUT FALLBACK)
+      const timeoutGuard = setTimeout(() => {
+        if (!isResolved && isBotThinkingRef.current) {
+          console.warn('Bot calculation 6s timeout reached. Triggering ultimate emergency move.');
+          isResolved = true;
+
+          // Restart worker silently
+          stockfishService.restartWorker();
+
+          // Fetch all legal moves and instantly play the first valid move
+          const possibleMoves = chess.moves({ verbose: true });
+          if (possibleMoves.length > 0) {
+            const emergencyMove = possibleMoves[0];
+            const pieceOnFrom = chess.get(emergencyMove.from);
+            const result = chess.move(emergencyMove);
+
+            if (result) {
+              const newFen = sanitizeAndValidateFen(chess.fen());
+              gameFenHistoryRef.current = [...gameFenHistoryRef.current, newFen];
+              setGameFenHistory(gameFenHistoryRef.current);
+              setLastMove({ from: emergencyMove.from, to: emergencyMove.to });
+              setBotArrow({ from: emergencyMove.from, to: emergencyMove.to });
+
+              if (pieceOnFrom) {
+                setGhostPiece({
+                  square: emergencyMove.from,
+                  type: pieceOnFrom.type,
+                  color: pieceOnFrom.color
+                });
+              }
+
+              playChessSound(result.captured ? 'capture' : 'move');
+
+              const record: MoveRecord = {
+                san: result.san,
+                from: result.from,
+                to: result.to,
+                piece: result.piece,
+                color: result.color,
+                captured: result.captured,
+                promotion: result.promotion,
+                flags: result.flags,
+                fenBefore: currentFen,
+                fenAfter: newFen
+              };
+              setHistory((prev) => [...prev, record]);
+              checkGameOver();
+              setFen(newFen);
+            }
+          }
+
+          isBotThinkingRef.current = false;
+          setIsBotThinking(false);
+          setIsBoardLocked(false);
+          setToastMessage('Failsafe move played.');
+          setTimeout(() => setToastMessage(null), 3000);
+        }
+      }, 6000);
+
       stockfishService.calculateMove(
         currentFen,
         personality,
         gameFenHistoryRef.current,
         (bestMoveStr) => {
+          if (isResolved) return;
+          isResolved = true;
+          clearTimeout(timeoutGuard);
+
           try {
-            if (!bestMoveStr || bestMoveStr.length < 4) {
-              return;
+            // 1. UNIFIED MOVE PARSER: Try applying the move directly (handles SAN + UCI)
+            let result = applyAnyMove(chess, bestMoveStr);
+
+            // If move failed, try regex/UCI converter
+            if (!result) {
+              const uciMove = extractAnyValidMove(currentFen, bestMoveStr);
+              if (uciMove) {
+                result = applyAnyMove(chess, uciMove);
+              }
             }
 
-            const from = bestMoveStr.substring(0, 2) as Square;
-            const to = bestMoveStr.substring(2, 4) as Square;
-            const promotion = bestMoveStr.length > 4 ? bestMoveStr[4] : undefined;
+            // If still failed, try deep grandmaster minimax
+            if (!result) {
+              const gmMove = stockfishService.calculateGrandmasterMove(currentFen);
+              if (gmMove) {
+                result = applyAnyMove(chess, gmMove);
+              }
+            }
 
-            const pieceOnFrom = chess.get(from);
+            // 3. ULTIMATE FAILSAFE: If everything fails, pick first legal move
+            if (!result) {
+              const possibleMoves = chess.moves({ verbose: true });
+              if (possibleMoves.length > 0) {
+                result = chess.move(possibleMoves[0]);
+              }
+            }
 
-            // Execute the winning move for targetColor
-            const result = chess.move({ from, to, promotion });
             if (result) {
-              const newFen = chess.fen();
+              const newFen = sanitizeAndValidateFen(chess.fen());
               gameFenHistoryRef.current = [...gameFenHistoryRef.current, newFen];
               setGameFenHistory(gameFenHistoryRef.current);
-              setLastMove({ from, to });
+              setLastMove({ from: result.from, to: result.to });
 
               // Render single tactical arrow
-              setBotArrow({ from, to });
+              setBotArrow({ from: result.from, to: result.to });
 
               // Render ghost piece on origin square
-              if (pieceOnFrom) {
-                setGhostPiece({
-                  square: from,
-                  type: pieceOnFrom.type,
-                  color: pieceOnFrom.color
-                });
-              }
+              setGhostPiece({
+                square: result.from,
+                type: result.piece,
+                color: result.color
+              });
 
               // Play audio feedback
               if (chess.inCheck()) {
@@ -167,7 +306,19 @@ export default function App() {
               setFen(newFen);
             }
           } catch (err) {
-            console.error('Error executing Lion move:', err);
+            console.error('Error executing bot move, triggering emergency fallback:', err);
+            // Emergency fallback on catch
+            const possibleMoves = chess.moves({ verbose: true });
+            if (possibleMoves.length > 0) {
+              const em = possibleMoves[0];
+              const res = chess.move(em);
+              if (res) {
+                const nFen = sanitizeAndValidateFen(chess.fen());
+                setFen(nFen);
+                setLastMove({ from: res.from, to: res.to });
+                setBotArrow({ from: res.from, to: res.to });
+              }
+            }
           } finally {
             isBotThinkingRef.current = false;
             setIsBotThinking(false);
@@ -214,20 +365,18 @@ export default function App() {
       }
 
       try {
-        const currentFen = chess.fen();
-        const result = chess.move(move);
+        const currentFen = sanitizeAndValidateFen(chess.fen());
+        const result = applyAnyMove(chess, move);
         if (!result) return false;
 
-        const newFen = chess.fen();
+        const newFen = sanitizeAndValidateFen(chess.fen());
         gameFenHistoryRef.current = [...gameFenHistoryRef.current, newFen];
         setGameFenHistory(gameFenHistoryRef.current);
-        setLastMove({ from: move.from, to: move.to });
-
-        // Clear previous bot indicators
+        setLastMove({ from: result.from, to: result.to });
         setBotArrow(null);
         setGhostPiece(null);
 
-        // Sound Feedback
+        // Sound feedback
         if (chess.inCheck()) {
           playChessSound('check');
         } else if (result.captured) {
@@ -251,39 +400,39 @@ export default function App() {
         };
         setHistory((prev) => [...prev, record]);
 
-        checkGameOver();
-
-        // Updating fen triggers the reactive turn dispatcher
+        const gameOver = checkGameOver();
         setFen(newFen);
 
-        return true;
-      } catch (err) {
-        console.error('Opponent move error:', err);
+        return !gameOver;
+      } catch {
+        playChessSound('illegal');
         return false;
       }
     },
     [chess, userColor, checkGameOver]
   );
 
-  // God Mode direct board mutation
+  // God Mode FEN update handler
   const handleGodModeBoardChange = useCallback(
     (newFen: string) => {
       try {
-        chess.load(newFen);
-        gameFenHistoryRef.current = [...gameFenHistoryRef.current, newFen];
+        const sanitized = sanitizeAndValidateFen(newFen);
+        chess.load(sanitized);
+        gameFenHistoryRef.current = [...gameFenHistoryRef.current, sanitized];
         setGameFenHistory(gameFenHistoryRef.current);
+        setFen(sanitized);
+        setLastMove(null);
         setBotArrow(null);
         setGhostPiece(null);
         checkGameOver();
-        setFen(newFen);
       } catch (err) {
-        console.error('God Mode Board update error:', err);
+        console.error('Failed to apply god mode change:', err);
       }
     },
     [chess, checkGameOver]
   );
 
-  // Setup / Start Game Trigger
+  // Setup Modal Launch
   const handleStartGame = useCallback(
     (config: {
       personality: AIPersonality;
@@ -291,23 +440,25 @@ export default function App() {
       playerColor: PlayerColor;
       startingFen: string;
     }) => {
+      const sanitized = sanitizeAndValidateFen(config.startingFen);
       stockfishService.reset();
-      chess.load(config.startingFen);
+      chess.load(sanitized);
 
       setUserColor(config.playerColor);
-      setIsFlipped(config.playerColor === 'b'); // Flip board so user's color is at the bottom
+      setIsFlipped(config.playerColor === 'b');
 
       setHistory([]);
-      gameFenHistoryRef.current = [config.startingFen];
-      setGameFenHistory([config.startingFen]);
+      gameFenHistoryRef.current = [sanitized];
+      setGameFenHistory([sanitized]);
       setLastMove(null);
       setBotArrow(null);
       setGhostPiece(null);
+      setToastMessage(null);
       setGameOverInfo({ isOver: false, title: '', description: '', winner: null });
       setIsSetupModalOpen(false);
 
       // Trigger the reactive dispatcher
-      setFen(config.startingFen);
+      setFen(sanitized);
     },
     [chess]
   );
@@ -317,8 +468,10 @@ export default function App() {
     stockfishService.reset();
     isBotThinkingRef.current = false;
     setIsBotThinking(false);
+    setIsBoardLocked(false);
     setBotArrow(null);
     setGhostPiece(null);
+    setToastMessage(null);
     setGameOverInfo({ isOver: false, title: '', description: '', winner: null });
     setIsSetupModalOpen(true);
   }, []);
@@ -346,6 +499,14 @@ export default function App() {
       {/* Main Focus Chess Arena */}
       <main className="flex-1 flex flex-col items-center justify-center p-3 md:p-6 select-none z-10">
         <div className="w-full max-w-[540px] flex flex-col items-center gap-3">
+          {/* Toast Notification for Timeout / Recovery */}
+          {toastMessage && (
+            <div className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-amber-500/20 border border-amber-400/40 text-amber-200 text-xs font-semibold shadow-lg backdrop-blur-md animate-fade-in">
+              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>{toastMessage}</span>
+            </div>
+          )}
+
           {/* Interactive 64-Square Chessboard */}
           <ChessBoard
             chess={chess}
@@ -361,7 +522,7 @@ export default function App() {
             setIsGodModeUnlocked={setIsGodModeUnlocked}
           />
 
-          {/* Minimal Status Hint Pill - ABSOLUTE TRUTH */}
+          {/* Minimal Status Hint Pill */}
           <div className="w-full flex items-center justify-between px-4 py-2.5 rounded-2xl bg-[#0b101c]/80 border border-[#d4af37]/20 text-xs text-amber-100/70 shadow-md backdrop-blur-md">
             <div className="flex items-center gap-2">
               <span
