@@ -31,7 +31,7 @@ interface InteractionState {
   draggedPiece: { type: string; color: 'w' | 'b' } | null;
 }
 
-export const ChessBoard: React.FC<ChessBoardProps> = ({
+export const ChessBoard = React.memo<ChessBoardProps>(({
   chess,
   isFlipped,
   onOpponentMove,
@@ -479,4 +479,4 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
       )}
     </div>
   );
-};
+});

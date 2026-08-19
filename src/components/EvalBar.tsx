@@ -5,7 +5,7 @@ interface EvalBarProps {
   isFlipped: boolean;
 }
 
-export const EvalBar: React.FC<EvalBarProps> = ({ scoreCp, isFlipped }) => {
+export const EvalBar = React.memo<EvalBarProps>(({ scoreCp, isFlipped }) => {
   // Convert centipawns (-1500 to +1500 range) to percentage (0% to 100% for White)
   const cappedCP = Math.max(-1500, Math.min(1500, scoreCp));
   let whitePercentage = 100 / (1 + Math.exp(-0.004 * cappedCP));
@@ -54,4 +54,4 @@ export const EvalBar: React.FC<EvalBarProps> = ({ scoreCp, isFlipped }) => {
       </div>
     </div>
   );
-};
+});

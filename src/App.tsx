@@ -504,6 +504,8 @@ export default function App() {
       setStatusText(`${personality.name} thinking for ${userColor === 'w' ? 'White' : 'Black'}`);
       executeBotMoveFor(userColor);
     } else {
+      isEngineRunning.current = false;
+      setIsBotThinking(false);
       setIsBoardLocked(false);
       setStatusText(`Your turn — input ${userColor === 'w' ? 'Black' : 'White'}'s move`);
     }

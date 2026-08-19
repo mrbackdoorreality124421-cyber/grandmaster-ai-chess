@@ -19,7 +19,7 @@ interface MoveHistoryPanelProps {
   isGameOver: boolean;
 }
 
-export const MoveHistoryPanel: React.FC<MoveHistoryPanelProps> = ({
+export const MoveHistoryPanel = React.memo<MoveHistoryPanelProps>(({
   history,
   activeMoveIndex,
   onSelectMoveIndex,
@@ -194,4 +194,4 @@ export const MoveHistoryPanel: React.FC<MoveHistoryPanelProps> = ({
       </div>
     </div>
   );
-};
+});

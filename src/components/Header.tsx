@@ -1,6 +1,6 @@
 import React from 'react';
 import { AIPersonality, PlayerColor } from '../types/chess';
-import { Settings, Sparkles } from 'lucide-react';
+import { Settings } from 'lucide-react';
 
 interface HeaderProps {
   personality: AIPersonality;
@@ -10,7 +10,7 @@ interface HeaderProps {
   onOpenMainMenu: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({
+export const Header = React.memo<HeaderProps>(({
   personality,
   userColor,
   activeTurn,
@@ -70,4 +70,4 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
     </header>
   );
-};
+});

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'gma-v1';
+const CACHE_NAME = 'gma-v2';
 const SHELL_ASSETS = [
   '/',
   '/index.html',

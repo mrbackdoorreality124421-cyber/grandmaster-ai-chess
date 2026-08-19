@@ -5,7 +5,7 @@ interface TacticalArrowsProps {
   boardRef: React.RefObject<HTMLDivElement | null>;
 }
 
-export const TacticalArrows: React.FC<TacticalArrowsProps> = ({
+export const TacticalArrows = React.memo<TacticalArrowsProps>(({
   arrow,
   boardRef
 }) => {
@@ -148,4 +148,4 @@ export const TacticalArrows: React.FC<TacticalArrowsProps> = ({
       </g>
     </svg>
   );
-};
+});
