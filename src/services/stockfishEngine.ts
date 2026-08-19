@@ -12,7 +12,7 @@ export interface EngineMoveResult {
   scoreCentipawns: number;
 }
 
-// PeSTO Midgame Piece-Square Positional Tables
+// PeSTO Midgame Piece-Square Positional Tables (Main-thread 1-ply evaluator)
 const PST_MG: Record<string, number[]> = {
   p: [
     0,   0,   0,   0,   0,   0,   0,   0,
@@ -76,7 +76,7 @@ const PST_MG: Record<string, number[]> = {
   ]
 };
 
-// Endgame King Positional Table (King is centralized in endgame)
+// Endgame King Positional Table
 const PST_EG_KING = [
   -50, -40, -30, -20, -20, -30, -40, -50,
   -30, -20, -10,   0,   0, -10, -20, -30,
@@ -159,8 +159,7 @@ export function extractAnyValidMove(fen: string, rawText: string): string | null
 }
 
 /**
- * 3. STRICT FEN SANITIZER & VALIDATOR
- * Returns DEFAULT_STARTING_FEN on any validation failure, never an invalid string.
+ * 2. STRICT FEN SANITIZER & VALIDATOR
  */
 export function sanitizeAndValidateFen(rawFen: string): string {
   if (!rawFen || typeof rawFen !== 'string') {
@@ -177,21 +176,17 @@ export function sanitizeAndValidateFen(rawFen: string): string {
 
     let [placement, activeColor, castling, enPassant, halfmove, fullmove] = tokens;
 
-    // Active color
     if (activeColor !== 'w' && activeColor !== 'b') {
       activeColor = 'w';
     }
 
-    // Castling rights
     castling = castling.replace(/[^KQkq]/g, '');
     if (!castling) castling = '-';
 
-    // En Passant square
     if (!/^[a-h][36]$/.test(enPassant)) {
       enPassant = '-';
     }
 
-    // Move counters
     const half = parseInt(halfmove, 10);
     const full = parseInt(fullmove, 10);
     const safeHalf = isNaN(half) || half < 0 ? '0' : half.toString();
@@ -210,6 +205,7 @@ class StockfishEngineService {
   private isSearching: boolean = false;
   private onBestMoveCallback: BestMoveCallback | null = null;
   private onEvalCallback: EvalCallback | null = null;
+  private lastEvalEmitTime: number = 0;
   private searchWatchdogTimer: NodeJS.Timeout | null = null;
   private gameFenHistory: string[] = [];
   private currentAbortController: AbortController | null = null;
@@ -236,9 +232,13 @@ class StockfishEngineService {
     this.initWorker();
   }
 
+  /**
+   * Initializes Web Worker.
+   * If Stockfish CDN is blocked or unavailable, the worker uses a self-contained pure JS fallback
+   * engine with iterative alpha-beta search, hard time budget, and quiescence search.
+   */
   private initWorker() {
     const now = Date.now();
-    // Throttle worker recreation to prevent loops
     if (now - this.lastWorkerInitTime < 2000 && this.worker) {
       return;
     }
@@ -254,6 +254,7 @@ class StockfishEngineService {
 
       const workerCode = `
         var sf = null;
+        var sfLoaded = false;
         var urls = [
           'https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js',
           'https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js'
@@ -265,12 +266,24 @@ class StockfishEngineService {
             var fn = typeof STOCKFISH === 'function' ? STOCKFISH : (typeof self.Stockfish === 'function' ? self.Stockfish : null);
             if (fn) {
               sf = fn();
+              sfLoaded = true;
               break;
             }
           } catch(e) {}
         }
 
-        if (sf) {
+        // Try importing chess.js in worker for pure-JS fallback engine if Stockfish fails
+        var chessLib = null;
+        if (!sfLoaded) {
+          try {
+            importScripts('https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js');
+            if (typeof Chess === 'function') {
+              chessLib = Chess;
+            }
+          } catch(e) {}
+        }
+
+        if (sfLoaded && sf) {
           sf.onmessage = function(e) {
             try {
               var line = typeof e === 'object' && e.data ? e.data : e;
@@ -284,12 +297,218 @@ class StockfishEngineService {
           };
           self.postMessage('STOCKFISH_READY');
         } else {
+          // Pure-JS Background Worker Engine (Runs off the main thread)
+          var currentFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+          var isSearchCancelled = false;
+
+          var P_VALS = { p: 100, n: 320, b: 330, r: 500, q: 900, k: 20000 };
+          var P_MG = {
+            p: [0,0,0,0,0,0,0,0,50,50,50,50,50,50,50,50,10,10,20,30,30,20,10,10,5,5,10,27,27,10,5,5,0,0,0,25,25,0,0,0,5,-5,-10,0,0,-10,-5,5,5,10,10,-25,-25,10,10,5,0,0,0,0,0,0,0,0],
+            n: [-50,-40,-30,-30,-30,-30,-40,-50,-40,-20,0,5,5,0,-20,-40,-30,5,15,20,20,15,5,-30,-30,0,20,30,30,20,0,-30,-30,5,20,30,30,20,5,-30,-30,0,15,20,20,15,0,-30,-40,-20,0,0,0,0,-20,-40,-50,-40,-30,-30,-30,-30,-40,-50],
+            b: [-20,-10,-10,-10,-10,-10,-10,-20,-10,5,0,0,0,0,5,-10,-10,10,10,10,10,10,10,-10,-10,0,15,20,20,15,0,-10,-10,5,10,20,20,10,5,-10,-10,0,10,10,10,10,0,-10,-10,5,0,0,0,0,5,-10,-20,-10,-10,-10,-10,-10,-10,-20],
+            r: [0,0,0,5,5,0,0,0,-5,0,0,0,0,0,0,-5,-5,0,0,0,0,0,0,-5,-5,0,0,0,0,0,0,-5,-5,0,0,0,0,0,0,-5,-5,0,0,0,0,0,0,-5,5,15,15,15,15,15,15,5,0,0,0,0,0,0,0,0],
+            q: [-20,-10,-10,-5,-5,-10,-10,-20,-10,0,5,0,0,0,0,-10,-10,5,5,5,5,5,0,-10,0,0,5,5,5,5,0,-5,-5,0,5,5,5,5,0,-5,-10,0,5,5,5,5,0,-10,-10,0,0,0,0,0,0,-10,-20,-10,-10,-5,-5,-10,-10,-20],
+            k: [20,30,10,0,0,10,30,20,20,20,0,0,0,0,20,20,-10,-20,-20,-20,-20,-20,-20,-10,-20,-30,-30,-40,-40,-30,-30,-20,-30,-40,-40,-50,-50,-40,-40,-30,-30,-40,-40,-50,-50,-40,-40,-30,-30,-40,-40,-50,-50,-40,-40,-30,-30,-40,-40,-50,-50,-40,-40,-30]
+          };
+
+          function evalPosition(chess, botColor) {
+            if (chess.in_checkmate && chess.in_checkmate()) return chess.turn() === botColor ? -99999 : 99999;
+            if (chess.in_draw && chess.in_draw()) return -500;
+            var score = 0;
+            var board = chess.board();
+            for (var r = 0; r < 8; r++) {
+              for (var c = 0; c < 8; c++) {
+                var p = board[r][c];
+                if (!p) continue;
+                var val = P_VALS[p.type] || 100;
+                var sq = p.color === 'w' ? r * 8 + c : (7 - r) * 8 + c;
+                var pst = (P_MG[p.type] && P_MG[p.type][sq]) || 0;
+                var total = val + pst;
+                if (p.color === botColor) score += total;
+                else score -= total;
+              }
+            }
+            return score;
+          }
+
+          function orderWorkerMoves(moves) {
+            return moves.sort(function(a, b) {
+              var sA = 0, sB = 0;
+              if (a.promotion === 'q') sA += 800;
+              if (b.promotion === 'q') sB += 800;
+              if (a.captured) sA += (P_VALS[a.captured] || 100) * 10 - (P_VALS[a.piece] || 100);
+              if (b.captured) sB += (P_VALS[b.captured] || 100) * 10 - (P_VALS[b.piece] || 100);
+              return sB - sA;
+            });
+          }
+
+          function qSearch(chess, alpha, beta, botColor, qDepth, state) {
+            if (state.cancelled || ++state.nodes % 512 === 0 && Date.now() - state.startTime > state.maxTime) {
+              state.cancelled = true;
+              return alpha;
+            }
+            var standPat = evalPosition(chess, botColor);
+            if (qDepth <= 0 || standPat >= beta) return standPat;
+            if (standPat > alpha) alpha = standPat;
+
+            var rawMoves = chess.moves({ verbose: true });
+            var captures = orderWorkerMoves(rawMoves.filter(function(m) { return m.captured || m.promotion === 'q'; }));
+
+            for (var i = 0; i < captures.length; i++) {
+              chess.move(captures[i]);
+              try {
+                var score = -qSearch(chess, -beta, -alpha, botColor, qDepth - 1, state);
+                if (score >= beta) return beta;
+                if (score > alpha) alpha = score;
+              } finally {
+                chess.undo();
+              }
+              if (state.cancelled) break;
+            }
+            return alpha;
+          }
+
+          function searchMinimax(chess, depth, alpha, beta, isMax, botColor, state) {
+            if (state.cancelled || ++state.nodes % 512 === 0 && Date.now() - state.startTime > state.maxTime) {
+              state.cancelled = true;
+              return 0;
+            }
+            if (chess.in_checkmate && chess.in_checkmate()) return isMax ? -99999 + depth : 99999 - depth;
+            if (chess.in_draw && chess.in_draw()) return 0;
+            if (depth <= 0) {
+              return qSearch(chess, alpha, beta, botColor, 4, state);
+            }
+
+            var moves = orderWorkerMoves(chess.moves({ verbose: true }));
+            if (moves.length === 0) return 0;
+
+            if (isMax) {
+              var maxEval = -Infinity;
+              for (var i = 0; i < moves.length; i++) {
+                chess.move(moves[i]);
+                try {
+                  var ev = searchMinimax(chess, depth - 1, alpha, beta, false, botColor, state);
+                  if (ev > maxEval) maxEval = ev;
+                  if (ev > alpha) alpha = ev;
+                } finally {
+                  chess.undo();
+                }
+                if (beta <= alpha || state.cancelled) break;
+              }
+              return maxEval;
+            } else {
+              var minEval = Infinity;
+              for (var j = 0; j < moves.length; j++) {
+                chess.move(moves[j]);
+                try {
+                  var ev2 = searchMinimax(chess, depth - 1, alpha, beta, true, botColor, state);
+                  if (ev2 < minEval) minEval = ev2;
+                  if (ev2 < beta) beta = ev2;
+                } finally {
+                  chess.undo();
+                }
+                if (beta <= alpha || state.cancelled) break;
+              }
+              return minEval;
+            }
+          }
+
+          function runPureJsSearch(fen, maxDepth, maxTimeMs) {
+            var chess = chessLib ? new chessLib(fen) : null;
+            if (!chess) {
+              self.postMessage('bestmove (none)');
+              return;
+            }
+
+            var botColor = chess.turn();
+            var moves = orderWorkerMoves(chess.moves({ verbose: true }));
+            if (moves.length === 0) {
+              self.postMessage('bestmove (none)');
+              return;
+            }
+
+            // Quick mate check
+            for (var mIdx = 0; mIdx < moves.length; mIdx++) {
+              chess.move(moves[mIdx]);
+              try {
+                if (chess.in_checkmate && chess.in_checkmate()) {
+                  var uci = moves[mIdx].from + moves[mIdx].to + (moves[mIdx].promotion || '');
+                  self.postMessage('info depth 1 score cp 99999');
+                  self.postMessage('bestmove ' + uci);
+                  return;
+                }
+              } finally {
+                chess.undo();
+              }
+            }
+
+            var bestMoveUci = moves[0].from + moves[0].to + (moves[0].promotion || '');
+            var bestScore = 0;
+            var state = {
+              startTime: Date.now(),
+              maxTime: Math.min(1500, maxTimeMs || 1000),
+              nodes: 0,
+              cancelled: false
+            };
+
+            // Iterative deepening search (Depth 1 up to maxDepth)
+            for (var d = 1; d <= Math.min(6, maxDepth || 3); d++) {
+              var currentBestMove = null;
+              var currentBestScore = -Infinity;
+
+              for (var i = 0; i < moves.length; i++) {
+                var move = moves[i];
+                chess.move(move);
+                try {
+                  var score = -searchMinimax(chess, d - 1, -Infinity, Infinity, false, botColor, state);
+                  if (score > currentBestScore) {
+                    currentBestScore = score;
+                    currentBestMove = move;
+                  }
+                } finally {
+                  chess.undo();
+                }
+                if (state.cancelled || Date.now() - state.startTime > state.maxTime) {
+                  state.cancelled = true;
+                  break;
+                }
+              }
+
+              if (!state.cancelled && currentBestMove) {
+                bestMoveUci = currentBestMove.from + currentBestMove.to + (currentBestMove.promotion || '');
+                bestScore = currentBestScore;
+                self.postMessage('info depth ' + d + ' score cp ' + currentBestScore);
+              } else {
+                break;
+              }
+            }
+
+            self.postMessage('bestmove ' + bestMoveUci);
+          }
+
           self.onmessage = function(e) {
             try {
-              if (e.data === 'uci') self.postMessage('uciok');
-              if (e.data === 'isready') self.postMessage('readyok');
-            } catch(err) {}
+              var msg = typeof e === 'object' && e.data ? e.data : '' + e;
+              if (typeof msg !== 'string') return;
+
+              if (msg === 'uci') {
+                self.postMessage('uciok');
+              } else if (msg === 'isready') {
+                self.postMessage('readyok');
+              } else if (msg.indexOf('position fen ') === 0) {
+                currentFen = msg.substring(13).trim();
+              } else if (msg.indexOf('go') === 0) {
+                var depthMatch = msg.match(/depth (\\d+)/);
+                var timeMatch = msg.match(/movetime (\\d+)/);
+                var d = depthMatch ? parseInt(depthMatch[1], 10) : 3;
+                var t = timeMatch ? parseInt(timeMatch[1], 10) : 1000;
+                runPureJsSearch(currentFen, d, t);
+              }
+            } catch(err) {
+              self.postMessage('bestmove (none)');
+            }
           };
+
           self.postMessage('STOCKFISH_READY');
         }
       `;
@@ -331,7 +550,6 @@ class StockfishEngineService {
   private configureWorkerOptions(personality: AIPersonality) {
     if (!this.isReady) return;
 
-    // Clamped contempt -100 to 100
     const contempt = Math.max(-100, Math.min(100, personality.contempt));
     const skill = Math.max(0, Math.min(20, personality.skillLevel));
     const threads = Math.max(1, Math.min(4, personality.threads || 2));
@@ -347,8 +565,10 @@ class StockfishEngineService {
   }
 
   /**
-   * 4. OPTIMIZED ENGINE OUTPUT HANDLER
-   * Only calls extractAnyValidMove on 'bestmove' lines.
+   * 4. OPTIMIZED ENGINE OUTPUT HANDLER (HOT PATH)
+   * Only processes 'bestmove' lines or 'info' lines containing ' score '.
+   * Throttles eval callback emission to at most once per 250ms.
+   * Removes all extractAnyValidMove calls on any other lines.
    */
   private handleOutput(line: string) {
     try {
@@ -360,22 +580,27 @@ class StockfishEngineService {
         return;
       }
 
-      // Parse score from info line if present for live eval
-      if (line.startsWith('info') && line.includes('score')) {
-        const cpMatch = line.match(/score cp (-?\d+)/);
-        const mateMatch = line.match(/score mate (-?\d+)/);
-        const depthMatch = line.match(/depth (\d+)/);
+      // Process 'info' lines containing ' score ' (throttled to <= 1 emit per 250ms)
+      if (line.startsWith('info') && line.includes(' score ')) {
+        const now = Date.now();
+        if (now - this.lastEvalEmitTime >= 250) {
+          this.lastEvalEmitTime = now;
+          const cpMatch = line.match(/score cp (-?\d+)/);
+          const mateMatch = line.match(/score mate (-?\d+)/);
+          const depthMatch = line.match(/depth (\d+)/);
 
-        const depth = depthMatch ? parseInt(depthMatch[1], 10) : 0;
+          const depth = depthMatch ? parseInt(depthMatch[1], 10) : 0;
 
-        if (cpMatch && this.onEvalCallback) {
-          const cp = parseInt(cpMatch[1], 10);
-          this.onEvalCallback(cp, depth);
-        } else if (mateMatch && this.onEvalCallback) {
-          const mateIn = parseInt(mateMatch[1], 10);
-          const cp = mateIn > 0 ? 10000 - mateIn * 100 : -10000 - mateIn * 100;
-          this.onEvalCallback(cp, depth);
+          if (cpMatch && this.onEvalCallback) {
+            const cp = parseInt(cpMatch[1], 10);
+            this.onEvalCallback(cp, depth);
+          } else if (mateMatch && this.onEvalCallback) {
+            const mateIn = parseInt(mateMatch[1], 10);
+            const cp = mateIn > 0 ? 10000 - mateIn * 100 : -10000 - mateIn * 100;
+            this.onEvalCallback(cp, depth);
+          }
         }
+        return;
       }
 
       // ONLY call move parser when line actually starts with 'bestmove'
@@ -383,6 +608,12 @@ class StockfishEngineService {
         const move = extractAnyValidMove(this.currentSearchingFen, line);
         if (move) {
           this.finishSearch(move);
+        } else {
+          // If bestmove was (none) or unparseable, use fast main-thread fallback
+          const fallback = this.calculateFastGrandmasterMove(this.currentSearchingFen);
+          if (fallback.move) {
+            this.finishSearch(fallback.move, fallback.scoreCentipawns);
+          }
         }
       }
     } catch (err) {
@@ -473,8 +704,11 @@ class StockfishEngineService {
       const oppMoves = sim.moves({ verbose: true });
       for (const om of oppMoves) {
         sim.move(om);
-        if (sim.isCheckmate()) return true;
-        sim.undo();
+        try {
+          if (sim.isCheckmate()) return true;
+        } finally {
+          sim.undo();
+        }
       }
 
       return false;
@@ -508,12 +742,13 @@ class StockfishEngineService {
   }
 
   // =========================================================================
-  // 3. SMARTER LOCAL ENGINE (Iterative Alpha-Beta + PeSTO + MVV-LVA + Quiescence)
+  // MAIN-THREAD FAST 1-PLY EVALUATOR (<5ms, NEVER BLOCKS MAIN THREAD)
+  // Mate-in-1 scan + MVV-LVA move ordering + PeSTO positional tables
   // =========================================================================
 
   public evaluateBoard(chess: Chess, botColor: 'w' | 'b'): number {
     if (chess.isCheckmate()) return chess.turn() === botColor ? -99999 : 99999;
-    if (chess.isDraw() || chess.isStalemate()) return -25000;
+    if (chess.isDraw() || chess.isStalemate()) return -500;
 
     let score = 0;
     const board = chess.board();
@@ -559,141 +794,74 @@ class StockfishEngineService {
     return score;
   }
 
-  private orderMoves(moves: Move[]): Move[] {
-    return moves.sort((a, b) => {
-      let scoreA = 0;
-      let scoreB = 0;
-
-      if (a.promotion === 'q') scoreA += 800;
-      if (b.promotion === 'q') scoreB += 800;
-
-      // MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
-      if (a.captured) {
-        scoreA += (PIECE_VALUES[a.captured] || 100) * 10 - (PIECE_VALUES[a.piece] || 100);
-      }
-      if (b.captured) {
-        scoreB += (PIECE_VALUES[b.captured] || 100) * 10 - (PIECE_VALUES[b.piece] || 100);
-      }
-
-      return scoreB - scoreA;
-    });
-  }
-
-  private quiescenceSearch(chess: Chess, alpha: number, beta: number, botColor: 'w' | 'b', maxQDepth: number): number {
-    const standPat = this.evaluateBoard(chess, botColor);
-    if (maxQDepth <= 0 || standPat >= beta) return standPat;
-    let currentAlpha = Math.max(alpha, standPat);
-
-    const captureMoves = this.orderMoves(
-      chess.moves({ verbose: true }).filter((m) => m.captured || m.promotion === 'q')
-    );
-
-    for (const move of captureMoves) {
-      chess.move(move);
-      const score = -this.quiescenceSearch(chess, -beta, -currentAlpha, botColor, maxQDepth - 1);
-      chess.undo();
-
-      if (score >= beta) return beta;
-      if (score > currentAlpha) currentAlpha = score;
-    }
-
-    return currentAlpha;
-  }
-
-  private minimaxSearch(
-    chess: Chess,
-    depth: number,
-    alpha: number,
-    beta: number,
-    isMaximizing: boolean,
-    botColor: 'w' | 'b'
-  ): number {
-    if (chess.isCheckmate()) return isMaximizing ? -99999 + depth : 99999 - depth;
-    if (chess.isStalemate() || chess.isDraw()) return -25000;
-    if (depth <= 0) {
-      return this.quiescenceSearch(chess, alpha, beta, botColor, 2);
-    }
-
-    const moves = this.orderMoves(chess.moves({ verbose: true }));
-    if (moves.length === 0) return 0;
-
-    if (isMaximizing) {
-      let maxEval = -Infinity;
-      for (const m of moves) {
-        chess.move(m);
-        const evalScore = this.minimaxSearch(chess, depth - 1, alpha, beta, false, botColor);
-        chess.undo();
-        maxEval = Math.max(maxEval, evalScore);
-        alpha = Math.max(alpha, evalScore);
-        if (beta <= alpha) break;
-      }
-      return maxEval;
-    } else {
-      let minEval = Infinity;
-      for (const m of moves) {
-        chess.move(m);
-        const evalScore = this.minimaxSearch(chess, depth - 1, alpha, beta, true, botColor);
-        chess.undo();
-        minEval = Math.min(minEval, evalScore);
-        beta = Math.min(beta, evalScore);
-        if (beta <= alpha) break;
-      }
-      return minEval;
-    }
-  }
-
   /**
-   * Smarter Local Search: Returns both the best move and its centipawns evaluation score
+   * Main-thread fast 1-ply evaluator (<5ms).
+   * Used for Watchdog fallback, hint suggestions, and immediate emergency evaluations.
+   * NEVER runs deep recursive alpha-beta search on the main thread.
    */
-  public calculateGrandmasterMove(fen: string, searchDepth: number = 3): EngineMoveResult {
+  public calculateFastGrandmasterMove(fen: string): EngineMoveResult {
     try {
       const chess = new Chess(fen);
-      const moves = this.orderMoves(chess.moves({ verbose: true }));
+      const moves = chess.moves({ verbose: true });
       if (moves.length === 0) {
         return { move: '', scoreCentipawns: 0 };
       }
 
       const botColor = chess.turn();
 
-      // 1. Instant Mate in 1 check
+      // 1. Instant Mate in 1 Check (wrapped in try/finally)
       for (const m of moves) {
         chess.move(m);
-        if (chess.isCheckmate()) {
+        try {
+          if (chess.isCheckmate()) {
+            return { move: `${m.from}${m.to}${m.promotion || ''}`, scoreCentipawns: 99999 };
+          }
+        } finally {
           chess.undo();
-          return { move: `${m.from}${m.to}${m.promotion || ''}`, scoreCentipawns: 99999 };
         }
-        chess.undo();
       }
 
+      // 2. Score 1-ply candidate moves by MVV-LVA & PeSTO tables (< 2ms)
       let bestScore = -Infinity;
       let scoredMoves: { move: Move; score: number }[] = [];
 
-      const targetDepth = Math.max(1, Math.min(4, searchDepth));
-
       for (const m of moves) {
         chess.move(m);
+        try {
+          // Anti-stalemate guard
+          if (chess.isStalemate()) {
+            continue;
+          }
 
-        // Anti-stalemate guard
-        if (chess.isStalemate()) {
+          // Anti-threefold repetition guard
+          const fenKey = chess.fen().split(' ').slice(0, 4).join(' ');
+          const repeats = this.gameFenHistory.filter((f) => f.split(' ').slice(0, 4).join(' ') === fenKey).length;
+          if (repeats >= 2) {
+            continue;
+          }
+
+          let score = 0;
+          if (chess.inCheck()) score += 80;
+          if (m.promotion === 'q') score += 800;
+          if (m.captured) {
+            score += (PIECE_VALUES[m.captured] || 100) * 10 - (PIECE_VALUES[m.piece] || 100);
+          }
+
+          // Positional PeSTO delta
+          const toCol = m.to.charCodeAt(0) - 97;
+          const toRow = 8 - parseInt(m.to[1], 10);
+          const pstIndex = botColor === 'w' ? toRow * 8 + toCol : (7 - toRow) * 8 + toCol;
+          const pstTable = PST_MG[m.piece];
+          if (pstTable && pstTable[pstIndex]) {
+            score += pstTable[pstIndex];
+          }
+
+          scoredMoves.push({ move: m, score });
+          if (score > bestScore) {
+            bestScore = score;
+          }
+        } finally {
           chess.undo();
-          continue;
-        }
-
-        // Anti-threefold repetition guard
-        const fenKey = chess.fen().split(' ').slice(0, 4).join(' ');
-        const repeats = this.gameFenHistory.filter((f) => f.split(' ').slice(0, 4).join(' ') === fenKey).length;
-        if (repeats >= 2) {
-          chess.undo();
-          continue;
-        }
-
-        const score = -this.minimaxSearch(chess, targetDepth - 1, -Infinity, Infinity, false, botColor);
-        chess.undo();
-
-        scoredMoves.push({ move: m, score });
-
-        if (score > bestScore) {
-          bestScore = score;
         }
       }
 
@@ -711,7 +879,7 @@ class StockfishEngineService {
       const bestUci = `${selectedMove.from}${selectedMove.to}${selectedMove.promotion || ''}`;
       return { move: bestUci, scoreCentipawns: bestScore === -Infinity ? 0 : bestScore };
     } catch (err) {
-      console.warn('calculateGrandmasterMove fallback notice:', err);
+      console.warn('calculateFastGrandmasterMove fallback notice:', err);
       try {
         const c = new Chess(fen);
         const legals = c.moves({ verbose: true });
@@ -724,8 +892,13 @@ class StockfishEngineService {
     }
   }
 
+  // Alias for backwards compatibility
+  public calculateGrandmasterMove(fen: string, _depth?: number): EngineMoveResult {
+    return this.calculateFastGrandmasterMove(fen);
+  }
+
   // =========================================================================
-  // MAIN ENGINE SEARCH (Book -> Tablebase -> Cloud APIs -> Worker -> Local Engine)
+  // MAIN ENGINE SEARCH (Book -> Tablebase -> Cloud APIs -> Worker -> Fast Failsafe)
   // =========================================================================
 
   public async calculateMove(
@@ -734,8 +907,9 @@ class StockfishEngineService {
     historyFens: string[],
     onBestMove: BestMoveCallback
   ) {
+    // 5. FIX SILENT DEADLOCK: Reset previous search if still marked active
     if (this.isSearching) {
-      return;
+      this.reset();
     }
 
     this.currentPersonality = personality;
@@ -749,7 +923,6 @@ class StockfishEngineService {
       if (bookMove) {
         const validatedBookMove = extractAnyValidMove(fen, bookMove);
         if (validatedBookMove && !this.isDrawOrBlunder(fen, validatedBookMove)) {
-          // Introduce human-like slight opening pause based on personality moveTimeMs
           const openingDelay = Math.min(200, personality.moveTimeMs / 6);
           setTimeout(() => {
             onBestMove(validatedBookMove, 25);
@@ -783,7 +956,7 @@ class StockfishEngineService {
       } catch {}
     }
 
-    // 3. Parallel Cloud GM Analysis (if online)
+    // 3. Parallel Cloud GM Analysis (if online and high rating)
     if (personality.rating >= 2000) {
       Promise.allSettled([
         this.fetchLichessCloud(fen, signal),
@@ -813,16 +986,16 @@ class StockfishEngineService {
     const targetDepth = isTactical ? personality.depth + 2 : personality.depth;
     const movetime = isTactical ? personality.moveTimeMs + 400 : personality.moveTimeMs;
 
-    // 4. Watchdog Timer: Runs Smarter Local Search if Web Worker takes too long
+    // 4. Watchdog Timer: Runs FAST 1-ply evaluator (<5ms) if Web Worker / Cloud takes too long
     this.clearWatchdog();
     this.searchWatchdogTimer = setTimeout(() => {
       if (this.isSearching) {
-        const gmResult = this.calculateGrandmasterMove(fen, personality.localSearchDepth);
-        this.finishSearch(gmResult.move, gmResult.scoreCentipawns);
+        const fastResult = this.calculateFastGrandmasterMove(fen);
+        this.finishSearch(fastResult.move, fastResult.scoreCentipawns);
       }
     }, movetime + 200);
 
-    // 5. Configure options for personality and send command to Stockfish Web Worker
+    // 5. Configure options for personality and send command to Web Worker
     this.configureWorkerOptions(personality);
     this.safePostMessage(`position fen ${fen}`);
     this.safePostMessage(`go depth ${targetDepth} movetime ${movetime}`);

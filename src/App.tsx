@@ -309,8 +309,8 @@ export default function App() {
           isResolved = true;
 
           try {
-            // Run iterative alpha-beta local search instead of random moves[0]
-            const searchResult = stockfishService.calculateGrandmasterMove(currentFen, personality.localSearchDepth);
+            // Run fast 1-ply main-thread evaluator (<5ms) instead of blocking deep search
+            const searchResult = stockfishService.calculateFastGrandmasterMove(currentFen);
             let emergencyMoveStr = searchResult.move;
 
             if (!emergencyMoveStr) {
@@ -394,9 +394,9 @@ export default function App() {
                 }
               }
 
-              // If still failed, try smarter local alpha-beta search
+              // If still failed, try fast 1-ply evaluator (<5ms)
               if (!result) {
-                const searchResult = stockfishService.calculateGrandmasterMove(currentFen, personality.localSearchDepth);
+                const searchResult = stockfishService.calculateFastGrandmasterMove(currentFen);
                 if (searchResult.move) {
                   result = applyAnyMove(liveChess, searchResult.move);
                 }
@@ -688,7 +688,7 @@ export default function App() {
     if (isBotThinking || isBoardLocked) return;
     try {
       const currentFen = sanitizeAndValidateFen(liveChess.fen());
-      const searchResult = stockfishService.calculateGrandmasterMove(currentFen, 3);
+      const searchResult = stockfishService.calculateFastGrandmasterMove(currentFen);
       if (searchResult.move && searchResult.move.length >= 4) {
         const from = searchResult.move.substring(0, 2);
         const to = searchResult.move.substring(2, 4);

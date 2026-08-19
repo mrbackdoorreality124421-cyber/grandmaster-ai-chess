@@ -6,10 +6,9 @@ interface EvalBarProps {
 }
 
 export const EvalBar: React.FC<EvalBarProps> = ({ scoreCp, isFlipped }) => {
-  // Convert centipawns (-1000 to +1000 range) to percentage (0% to 100% for White)
-  // Logistic conversion formula
-  const clampedCp = Math.max(-1500, Math.min(1500, scoreCp));
-  let whitePercentage = 50 + (2 / (1 + Math.exp(-0.0035 * clampedCp)) - 1) * 50;
+  // Convert centipawns (-1500 to +1500 range) to percentage (0% to 100% for White)
+  const cappedCP = Math.max(-1500, Math.min(1500, scoreCp));
+  let whitePercentage = 100 / (1 + Math.exp(-0.004 * cappedCP));
   whitePercentage = Math.max(5, Math.min(95, whitePercentage));
 
   const displayPercentage = isFlipped ? 100 - whitePercentage : whitePercentage;
