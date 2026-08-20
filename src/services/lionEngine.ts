@@ -119,32 +119,54 @@ class LionEngineService {
     this.isSearching = true;
     this.onBestMoveCallback = callback;
     
-    let depth = 3;
-    let movetime = 1000;
-    let blunderRate = 0;
+    let depth = personality.depth || 10;
+    let movetime = personality.moveTimeMs || 2000;
+    let elo = personality.rating || 2000;
+    let skillLevel = personality.skillLevel ?? 20;
 
-    // PERSONALITY MAPPING
-    // Novice: depth 1, 300ms, blunder 0.35
-    // Club: depth 2, 500ms, blunder 0.15
-    // Expert: depth 3, 900ms, blunder 0.05
-    // Master: depth 3, 1400ms, blunder 0
-    // Grandmaster: depth 4, 2000ms, blunder 0
-    // LION APEX: depth 4, 2500ms, blunder 0
-    
+    // PERSONALITY MAPPING (UCI Stockfish + Fallback)
     const id = personality.id;
-    if (id === 'novice') { depth = 1; movetime = 300; blunderRate = 0.35; }
-    else if (id === 'club') { depth = 2; movetime = 500; blunderRate = 0.15; }
-    else if (id === 'expert') { depth = 3; movetime = 900; blunderRate = 0.05; }
-    else if (id === 'master') { depth = 3; movetime = 1400; blunderRate = 0; }
-    else if (id === 'grandmaster') { depth = 4; movetime = 2000; blunderRate = 0; }
-    else if (id === 'lion') { depth = 4; movetime = 2500; blunderRate = 0; }
+    if (id === 'novice') { 
+      depth = 5; 
+      movetime = 1000; 
+      elo = 1350; 
+      skillLevel = 1; 
+    } else if (id === 'club' || id === 'club-player') { 
+      depth = 8; 
+      movetime = 1500; 
+      elo = 1500; 
+      skillLevel = 6; 
+    } else if (id === 'expert') { 
+      depth = 12; 
+      movetime = 2500; 
+      elo = 1800; 
+      skillLevel = 12; 
+    } else if (id === 'master') { 
+      depth = 16; 
+      movetime = 4000; 
+      elo = 2200; 
+      skillLevel = 17; 
+    } else if (id === 'grandmaster') { 
+      depth = 20; 
+      movetime = 5500; 
+      elo = 2600; 
+      skillLevel = 20; 
+    } else if (id === 'lion' || id === 'lion-apex') { 
+      depth = 24; 
+      movetime = 8000; 
+      elo = 3500; 
+      skillLevel = 20; 
+    }
 
     this.worker?.postMessage({
       type: 'search',
       fen: validFen,
       depth,
       movetime,
-      blunderRate
+      personalityId: id,
+      elo,
+      skillLevel,
+      threads: personality.threads || 4
     });
   }
 

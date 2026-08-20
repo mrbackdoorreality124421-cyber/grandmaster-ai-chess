@@ -367,7 +367,7 @@ export default function App() {
             setIsBoardLocked(false);
           }
         }
-      }, 6000);
+      }, Math.max(12000, (personality.moveTimeMs || 8000) + 5000));
 
       try {
         engineService.syncGameHistory(gameFenHistoryRef.current);
