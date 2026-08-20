@@ -86,31 +86,6 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 3. Third-party CDN libraries (Stockfish.js, fonts, cdnjs): Stale-While-Revalidate
-  if (
-    url.hostname.includes('cdnjs.cloudflare.com') ||
-    url.hostname.includes('jsdelivr.net') ||
-    url.hostname.includes('fonts.googleapis.com') ||
-    url.hostname.includes('fonts.gstatic.com')
-  ) {
-    event.respondWith(
-      caches.match(request).then((cachedResponse) => {
-        const fetchPromise = fetch(request)
-          .then((networkResponse) => {
-            if (networkResponse && networkResponse.status === 200) {
-              const responseClone = networkResponse.clone();
-              caches.open(CACHE_NAME).then((cache) => cache.put(request, responseClone));
-            }
-            return networkResponse;
-          })
-          .catch(() => cachedResponse);
-
-        return cachedResponse || fetchPromise;
-      })
-    );
-    return;
-  }
-
   // Default network fetch
   event.respondWith(
     fetch(request).catch(() => caches.match(request))

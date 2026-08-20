@@ -6,11 +6,11 @@ import { Trophy, RefreshCw, AlertCircle, Sparkles } from 'lucide-react';
 import { AI_PERSONALITIES, LION_MODE, PRESET_VARIANTS } from './constants/chessData';
 import { AIPersonality, MoveRecord, PlayerColor, PresetVariant, SavedGameState } from './types/chess';
 import {
-  stockfishService,
+  engineService,
   extractAnyValidMove,
   sanitizeAndValidateFen,
   DEFAULT_STARTING_FEN
-} from './services/stockfishEngine';
+} from './services/lionEngine';
 import { playChessSound, setSoundEnabled, isSoundEnabled } from './utils/audio';
 
 import { Header } from './components/Header';
@@ -218,13 +218,13 @@ export default function App() {
     }
   }, [liveChess]);
 
-  // Connect live evaluation callback from Stockfish Engine
+  // Connect live evaluation callback from Lion Engine
   useEffect(() => {
-    stockfishService.setEvalCallback((cp) => {
+    engineService.setEvalCallback((cp) => {
       setEvalScoreCp(cp);
     });
     return () => {
-      stockfishService.setEvalCallback(null);
+      engineService.setEvalCallback(null);
     };
   }, []);
 
@@ -309,15 +309,12 @@ export default function App() {
           isResolved = true;
 
           try {
-            // Run fast 1-ply main-thread evaluator (<5ms) instead of blocking deep search
-            const searchResult = stockfishService.calculateFastGrandmasterMove(currentFen);
-            let emergencyMoveStr = searchResult.move;
-
-            if (!emergencyMoveStr) {
-              const legals = liveChess.moves({ verbose: true });
-              if (legals.length > 0) {
-                emergencyMoveStr = `${legals[0].from}${legals[0].to}${legals[0].promotion || ''}`;
-              }
+            // Run random fallback since emergency
+            let emergencyMoveStr = '';
+            const legals = liveChess.moves({ verbose: true });
+            if (legals.length > 0) {
+              const randIdx = Math.floor(Math.random() * legals.length);
+              emergencyMoveStr = `${legals[randIdx].from}${legals[randIdx].to}${legals[randIdx].promotion || ''}`;
             }
 
             if (emergencyMoveStr) {
@@ -328,7 +325,7 @@ export default function App() {
                 setGameFenHistory(gameFenHistoryRef.current);
                 setLastMove({ from: result.from, to: result.to });
                 setBotArrow({ from: result.from, to: result.to });
-                setEvalScoreCp(searchResult.scoreCentipawns || 0);
+                setEvalScoreCp(0);
 
                 const pieceOnFrom = liveChess.get(result.to);
                 if (pieceOnFrom) {
@@ -373,10 +370,10 @@ export default function App() {
       }, 6000);
 
       try {
-        stockfishService.calculateMove(
+        engineService.syncGameHistory(gameFenHistoryRef.current);
+        engineService.calculateMove(
           currentFen,
           personality,
-          gameFenHistoryRef.current,
           (bestMoveStr, scoreCp) => {
             if (isResolved) return;
             isResolved = true;
@@ -391,14 +388,6 @@ export default function App() {
                 const uciMove = extractAnyValidMove(currentFen, bestMoveStr);
                 if (uciMove) {
                   result = applyAnyMove(liveChess, uciMove);
-                }
-              }
-
-              // If still failed, try fast 1-ply evaluator (<5ms)
-              if (!result) {
-                const searchResult = stockfishService.calculateFastGrandmasterMove(currentFen);
-                if (searchResult.move) {
-                  result = applyAnyMove(liveChess, searchResult.move);
                 }
               }
 
@@ -538,7 +527,7 @@ export default function App() {
         setBotArrow(null);
         setGhostPiece(null);
 
-        // Sound feedback
+        // Audio feedback
         if (liveChess.inCheck()) {
           playChessSound('check');
         } else if (result.captured) {
@@ -546,10 +535,6 @@ export default function App() {
         } else {
           playChessSound('move');
         }
-
-        // Fast local evaluation for eval bar
-        const quickEval = stockfishService.evaluateBoard(liveChess, 'w');
-        setEvalScoreCp(quickEval);
 
         // Record history & persist state
         const record: MoveRecord = {
@@ -611,7 +596,7 @@ export default function App() {
       startingFen: string;
     }) => {
       const sanitized = sanitizeAndValidateFen(config.startingFen);
-      stockfishService.reset();
+      engineService.restartWorker();
       liveChess.load(sanitized);
 
       setPersonality(config.personality);
@@ -643,7 +628,7 @@ export default function App() {
 
   // Open Main Menu: Stop engine, reset state, and reopen setup modal
   const handleOpenMainMenu = useCallback(() => {
-    stockfishService.reset();
+    engineService.restartWorker();
     isEngineRunning.current = false;
     lastProcessedTurnFen.current = '';
     setIsBotThinking(false);
@@ -690,14 +675,15 @@ export default function App() {
     if (isBotThinking || isBoardLocked) return;
     try {
       const currentFen = sanitizeAndValidateFen(liveChess.fen());
-      const searchResult = stockfishService.calculateFastGrandmasterMove(currentFen);
-      if (searchResult.move && searchResult.move.length >= 4) {
-        const from = searchResult.move.substring(0, 2);
-        const to = searchResult.move.substring(2, 4);
-        setBotArrow({ from, to });
-        setToastMessage(`Hint: ${from.toUpperCase()} ➔ ${to.toUpperCase()}`);
-        setTimeout(() => setToastMessage(null), 3500);
-      }
+      engineService.getTacticalHint(currentFen).then((searchResult) => {
+        if (searchResult.move && searchResult.move.length >= 4) {
+          const from = searchResult.move.substring(0, 2);
+          const to = searchResult.move.substring(2, 4);
+          setBotArrow({ from, to });
+          setToastMessage(`Hint: ${from.toUpperCase()} ➔ ${to.toUpperCase()}`);
+          setTimeout(() => setToastMessage(null), 3500);
+        }
+      });
     } catch (err) {
       console.warn('Hint generation notice:', err);
     }

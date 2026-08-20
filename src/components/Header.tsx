@@ -29,9 +29,8 @@ export const Header = React.memo<HeaderProps>(({
           Grandmaster<span className="text-[#d4af37]">AI</span>
         </h1>
         <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#0b101c]/90 border border-[#d4af37]/35 text-[11px] font-medium text-amber-200/90 shadow-[0_0_10px_rgba(212,175,55,0.15)]">
-          <span>{personality.icon}</span>
-          <span className="font-bold">{personality.name}</span>
-          <span className="text-[10px] text-amber-400/80 font-mono hidden sm:inline">({personality.rating})</span>
+          <span>🧠</span>
+          <span className="font-bold">LION CORE • OFFLINE</span>
         </div>
       </div>
 
